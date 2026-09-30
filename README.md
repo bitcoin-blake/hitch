@@ -18,6 +18,18 @@ Hitch is the Lightning construction without the Lightning network. There are no 
 
 Fees are a fixed amount per channel transaction, paid by the funder. The delay is 6 blocks by default, about two hours here.
 
+## The first run (30 September 2026)
+
+Two tabs on one machine, each its own node, over the live txbt4 chain with blocks about twenty minutes apart.
+
+| step | block | what happened |
+|---|---|---|
+| open | 152,081 | A proposed 100,000 sat to B; accepted, both first commitments signed, funding published, in 8 s |
+| pay | – | A paid B's 5,000 sat invoice; B pushed 1,000 back; state 2, both revocation secrets exchanged |
+| close | 152,082 | A asked, B signed and published; 4,000 sat to B's key, the rest to A's |
+| cheat | 152,083 | on a second channel A paid 30,000 then published its revoked state 0 |
+| penalty | 152,084 | B's tab found the old commitment in its own chain within 40 s, spent its to_local with the revealed secret: 99,400 sat to B, accepted by the Knots node |
+
 ## Name
 
 A hitch ties a line to something. Reef the knot, Bight the slack, Winch the pull, Hitch the tie.
