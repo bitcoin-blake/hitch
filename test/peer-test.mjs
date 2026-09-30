@@ -29,13 +29,13 @@ await A.peer.pay(chA, 1000, 'hello'); await pump(); const hubA = HUB.channels.fi
 t('a direct payment moves the balance on both sides and revokes state 0 both ways', chA.n === 1 && hubA.n === 1 && chA.states[1].balA === 99000 && hubA.states[1].balB === 1000 && chA.theirRev[0] && hubA.theirRev[0]);
 // B issues an invoice routed via the hub; A pays it with an HTLC
 const { preimage, inv } = B.peer.invoice(20000, 'coffee', [HUB.pub]); B.invoices.set(inv.h, { preimage, amount: 20000 });
-await A.peer.addHtlc(chA, { amount: inv.a + inv.f, hash: inv.h, expiry: chain.height + 40, route: { to: inv.p }, memo: inv.m }); await pump(); await settle();
+await A.peer.addHtlc(chA, { amount: inv.a + inv.f, hash: inv.h, expiry: chain.height + 60, route: { to: inv.p }, memo: inv.m }); await pump(); await settle();
 const hubB = HUB.channels.find((c) => c.id === chB.id);
 t('the HTLC crossed the hub, B settled it with the preimage, the hub settled upstream: B gained 20,000, the hub kept its fee', chB.states[chB.n].balA === 50000 + 20000 && hubB.states[hubB.n].balB === 50000 - 20000 && chA.states[chA.n].balA === 99000 - 20010 && hubA.states[hubA.n].balB === 1000 + 20010 && (chA.states[chA.n].htlcs ?? []).length === 0 && (chB.states[chB.n].htlcs ?? []).length === 0);
 t('every commitment along the way still verifies', [A, B, HUB].every((p) => p.channels.every((c) => { const my = p.peer.myCommitAt(c, c.n); my.tx.witness = [C.fundingWitness(c, { [p.pub]: C.signFunding(c, my.tx, p.key), [c.peer]: c.sigs[c.n] })]; return C.verifyTx(my.tx, [C.fundingPrevout(c)]).ok === true; })));
 // an invoice for a node the hub has no channel to fails back, and A's balance returns
 const stranger = signer.pubkeyOf(signer.randomKey()); const before = chA.states[chA.n].balA;
-await A.peer.addHtlc(chA, { amount: 5000, hash: B.peer.sha(signer.randomKey()), expiry: chain.height + 40, route: { to: stranger } }); await pump(); await settle();
+await A.peer.addHtlc(chA, { amount: 5000, hash: B.peer.sha(signer.randomKey()), expiry: chain.height + 60, route: { to: stranger } }); await pump(); await settle();
 t('an HTLC with no route is failed by the hub and the amount returns to A', chA.states[chA.n].balA === before && (chA.states[chA.n].htlcs ?? []).length === 0);
 // cooperative close of B's channel
 await B.peer.closeChannel(chB); await pump();

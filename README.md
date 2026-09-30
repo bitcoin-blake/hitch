@@ -36,6 +36,12 @@ HTLCs are in since the second night (30 September 2026): a hash-locked output in
 
 First routed payment, 30 September 2026, on the live chain: A opened 100,000 sat to the estate's hub, B opened 100,000 with 50,000 pushed to the hub (block 152,086); B issued a 20,000 sat invoice naming the hub; A's HTLC of 20,010 crossed the hub as an HTLC of 20,000 to B, B settled with the preimage, the hub settled upstream; 25 seconds end to end, nothing on the chain.
 
+## Running the tests, running a hub, keeping it safe
+
+`npm test` runs the three suites (`test/channel-test.mjs` against the kernel's interpreter, `test/peer-test.mjs` and `test/adversarial-test.mjs` with three peers in memory). They import the kernel, the codec and the sidestr library from sibling checkouts: `SCHEMA` (bitcoin-desktop/schema), `BLAKETESTNODE` (bitcoin-blake/blaketestnode) and `SIDESTR_LIB` (sidestr/spec/siding/lib), defaulting to `~/bitcoin-desktop/schema`, `~/remote/github.com/bitcoin-blake/blaketestnode` and `~/remote/github.com/sidestr/spec/siding/lib`. The page pins those three by commit; the hub imports the working trees named by the same variables, so pin your checkouts before running one.
+
+A hub (`bin/hub.mjs`) keeps its key in the file named by `--key-file` (mode 600, refused otherwise) and its channels in `--data` (`channels.json`, the previous copy as `.bak`, finished channels in `archive.jsonl`, the block cursor in `cursor.json`). It refuses to start with a key that is not the one its channel documents were made with. Back up the key file and the data directory together, off the host, after every session that opened or closed a channel; restoring an older `channels.json` and force-closing from it is a cheat the other side will punish, so resync first (the status page says when the hub started from the backup copy). The status page (`--status PORT`, localhost only) lists every channel and HTLC with its deadline, the block cursor, the relays, a reconciliation of open channels against the node's view, and answers 503 while the chain view is stale, a save has failed or the backup copy is in use. Admission is capped per key, in all, unfunded, per hour and by delay (`--max-per-peer`, `--max-channels`, `--max-unfunded`, `--open-rate`, `--max-delay`); a proposal nobody funds within twenty minutes is dropped. Both a tab and the hub count a channel open at two confirmations.
+
 ## Name
 
 A hitch ties a line to something. Reef the knot, Bight the slack, Winch the pull, Hitch the tie.

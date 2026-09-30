@@ -8,11 +8,11 @@ const k = await loadEngine('btc:testnet4-blake2b'); const signer = makeSigner({ 
 let ok = 0, bad = 0; const t = (name, cond, detail = '') => { console.log(`  ${cond ? 'PASS' : 'FAIL'}  ${name}${cond || !detail ? '' : `\n        ${detail}`}`); cond ? ok++ : bad++; };
 const chain = { height: 152100, broadcasts: [], refuse: false, spent: new Map(), mine() { for (const b of this.broadcasts) { let tx; try { tx = C.decode(b.hex); } catch { continue; } for (const i of tx.inputs) this.spent.set(`${i.prevout.txid}:${i.prevout.vout}`, { txid: C.txid(tx), height: this.height, hex: b.hex }); } } }; const inbox = []; const peers = {}; let seq = 0;
 const settle = async () => { for (let i = 0; i < 12; i++) { await pump(); await new Promise((r) => setTimeout(r, 40)); } };
-function host(name, { hub = false, fee = 300, delay = 6 } = {}, restore = null) { const key = restore?.key ?? hash.bytesToHex(hash.sha256(new TextEncoder().encode('hitch-test-' + name))), pub = signer.pubkeyOf(key); const channels = restore ? JSON.parse(JSON.stringify(restore.channels)) : []; const invoices = restore?.invoices ?? new Map(); const notes = [];
+function host(name, { hub = false, fee = 300, delay = 6, minDelay = 3 } = {}, restore = null) { const key = restore?.key ?? hash.bytesToHex(hash.sha256(new TextEncoder().encode('hitch-test-' + name))), pub = signer.pubkeyOf(key); const channels = restore ? JSON.parse(JSON.stringify(restore.channels)) : []; const invoices = restore?.invoices ?? new Map(); const notes = [];
   const io = { myScript: '5120' + pub, height: () => chain.height, save: () => (io.saveFails ? false : true), findSpend: async (ch, { txid, vout }) => chain.spent.get(`${txid}:${vout}`) ?? null, invoiceFor: (h) => invoices.get(h) ?? null, log: (s, c) => { if (process.env.VERBOSE || (c === 'e' && process.env.ERRS)) console.log(`    [${name}] ${s}`); }, notify: (t, b) => { notes.push(`${t}: ${b}`); },
     send: async (ch, body) => { inbox.push({ to: ch.peer, from: pub, body: JSON.parse(JSON.stringify(body)) }); return 1; }, broadcast: async (hex, what) => { if (chain.refuse) return 0; chain.broadcasts.push({ from: name, hex, what }); return 1; },
     buildFunding: async () => { const txid = hash.bytesToHex(hash.sha256(new TextEncoder().encode(name + (++seq)))); return { txid, vout: 0, hex: '00' }; } };
-  const peer = makePeer({ C, signer, hash, pub, key, channels, io, opts: { delay, fee, hubFee: 10, pendingTimeout: 0, hub } }); const router = makeRouter({ peer, io, invoices, hub, retryMs: 30 }); const bg = (f) => (...a) => { f(...a).catch((e) => io.log(`router: ${e.message}`, 'e')); }; io.onUpdate = bg(router.onUpdate); io.onDropped = bg(router.onDropped); io.onPreimage = bg(router.onPreimage);
+  const peer = makePeer({ C, signer, hash, pub, key, channels, io, opts: { delay, fee, hubFee: 10, pendingTimeout: 0, hub, minDelay } }); const router = makeRouter({ peer, io, invoices, hub, retryMs: 30 }); const bg = (f) => (...a) => { f(...a).catch((e) => io.log(`router: ${e.message}`, 'e')); }; io.onUpdate = bg(router.onUpdate); io.onDropped = bg(router.onDropped); io.onPreimage = bg(router.onPreimage);
   return peers[pub] = { name, pub, key, peer, invoices, channels, io, router, notes }; }
 async function pump(limit = 200) { let guard = 0; while (inbox.length && guard++ < limit) { const m = inbox.shift(); await peers[m.to].peer.onMessage(m.from, m.body); } return guard; }
 const confirm = (id) => { for (const p of Object.values(peers)) for (const c of p.channels) if (c.id === id && c.status === 'funding') { c.status = 'open'; c.fundedHeight = chain.height; } };
@@ -26,7 +26,7 @@ const evil = [{ t: 'open', id: 'zz', funding: {} }, null, 1, 'x', [], { t: 'upda
   { t: 'open', id: '0'.repeat(16), funding: { txid: '0'.repeat(64), vout: 0, value: 100000 }, push: 0, delay: 2 ** 31, fee: 300, a: A.pub, b: HUB.pub, rev: ['ab'.repeat(32), 'cd'.repeat(32)] }, { t: 'open', id: '1'.repeat(16), funding: { txid: '1'.repeat(64), vout: 0, value: 100000 }, push: 0, delay: 1, fee: 300, a: A.pub, b: HUB.pub, rev: ['ab'.repeat(32), 'cd'.repeat(32)] },
   { t: 'ack', id: chA.id, n: 1, sig: 'ab'.repeat(65), reveal: 'zz', nextRev: 'ab'.repeat(32) }, { t: 'revoke', id: chA.id, n: 1, reveal: 'ab'.repeat(32) }, { t: 'sync', id: chA.id, n: 999, status: 'open', pendingN: 5 }, { t: 'close', id: chA.id, n: 7, sig: 'ab'.repeat(65) }];
 let threw = 0; for (const m of evil) { try { await HUB.peer.onMessage(A.pub, m); } catch { threw++; } }
-t('fourteen malformed or hostile messages are dropped without an exception and without touching the channel', threw === 0 && snapshot(HUB) === before && HUB.channels.length === 1, `threw ${threw}, changed ${snapshot(HUB) !== before}`);
+t(`${evil.length} malformed or hostile messages are dropped without an exception and without touching the channel`, threw === 0 && snapshot(HUB) === before && HUB.channels.length === 1, `threw ${threw}, changed ${snapshot(HUB) !== before}`);
 t('a well-formed message from the wrong sender is ignored', (await HUB.peer.onMessage(B.pub, { t: 'sync', id: chA.id, n: 0, status: 'open' }), snapshot(HUB) === before));
 t('the delay floor and the integer rule are enforced at the boundary', HUB.peer.wellFormed({ t: 'open', id: '0'.repeat(16), funding: { txid: '0'.repeat(64), vout: 0, value: 100000.5 }, push: 0, delay: 6, fee: 300, a: A.pub, b: HUB.pub, rev: ['ab'.repeat(32), 'cd'.repeat(32)] }) != null && HUB.peer.wellFormed({ t: 'update', id: chA.id, n: 1, kind: 'pay', amount: 10, sig: 'ab'.repeat(65), nextRev: 'ab'.repeat(32), memo: 'x'.repeat(200) }) != null);
 
@@ -50,14 +50,14 @@ t('the loser remembers the alternative state 3 it signed for the winner', !!alt 
 // ---- HTLC expiry rules: settle refused after the expiry, fail refused while the receiver holds the preimage
 const chB = await B.peer.openChannel(HUB.pub, 100000, 50000); await pump(); confirm(chB.id); const hubB = HUB.channels.find((c) => c.id === chB.id);
 const { preimage, inv } = B.peer.invoice(5000, 'x', [HUB.pub]); B.invoices.set(inv.h, { preimage, amount: 5000 });
-await A.peer.addHtlc(chA, { amount: 5010, hash: inv.h, expiry: chain.height + 40, route: { to: B.pub } }); await pump(); await settle();
+await A.peer.addHtlc(chA, { amount: 5010, hash: inv.h, expiry: chain.height + 60, route: { to: B.pub } }); await pump(); await settle();
 t('a routed payment with the new finality still settles end to end', chB.states[chB.n].balA === 55000 && chA.states[chA.n].htlcs.length === 0);
 const { preimage: p2, inv: i2 } = B.peer.invoice(5000, 'late', [HUB.pub]); B.invoices.set(i2.h, { preimage: p2, amount: 5000 });
-await A.peer.addHtlc(chA, { amount: 5010, hash: i2.h, expiry: chain.height + 40, route: { to: B.pub } }); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await A.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await HUB.peer.onMessage(rev.from, rev.body); }
+await A.peer.addHtlc(chA, { amount: 5010, hash: i2.h, expiry: chain.height + 60, route: { to: B.pub } }); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await A.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await HUB.peer.onMessage(rev.from, rev.body); }
 // the hub has forwarded to B (pending in the inbox); B is offline: drain B's messages so it never answers
 inbox.splice(0, inbox.length);
 const hubDown = hubB; t('the hub forwarded the HTLC downstream and holds it against the upstream one', hubDown.pending?.m.kind === 'add' && hubA.states[hubA.n].htlcs.some((h) => h.hash === i2.h));
-chain.height += 45; let failed = null; try { await A.peer.failHtlc(chA, hubA.states[hubA.n].htlcs.find((h) => h.hash === i2.h).id, 'expired'); await pump(); } catch (e) { failed = e.message; }
+chain.height += 65; let failed = null; try { await A.peer.failHtlc(chA, hubA.states[hubA.n].htlcs.find((h) => h.hash === i2.h).id, 'expired'); await pump(); } catch (e) { failed = e.message; }
 t('after the expiry the offerer can fail the upstream HTLC when the hub has no preimage, and the amount returns', failed === null && hubA.states[hubA.n].htlcs.every((h) => h.hash !== i2.h) && chA.states[chA.n].balA === chA.states[chA.n - 1].balA + 5010);
 { const late = B.channels.find((c) => c.id === chB.id); let refused = null; hubDown.pending = null; delete hubDown.states[hubDown.n + 1]; // the hub's forward never reached B: pretend it did and B settles late
   hubDown.states[hubDown.n].htlcs.push({ id: 9, from: 'b', amount: 5000, hash: i2.h, expiry: chain.height - 1, route: null }); late.states[late.n].htlcs = hubDown.states[hubDown.n].htlcs.map((h) => ({ ...h }));
@@ -66,14 +66,14 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
 // ---- the receiver of an HTLC who knows the preimage refuses a fail from the offerer
 { const { preimage: p3, inv: i3 } = HUB.peer.invoice(2000, 'direct', []); HUB.invoices.set(i3.h, { preimage: p3, amount: 2000 });
   await A.peer.addHtlc(chA, { amount: 2000, hash: i3.h, expiry: chain.height + 40, route: null }); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await A.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await HUB.peer.onMessage(rev.from, rev.body); inbox.splice(0, inbox.length); }
-  const id = hubA.states[hubA.n].htlcs.find((h) => h.hash === i3.h).id; chain.height += 45; const s0 = snapshot(HUB); const failMsg = { t: 'update', id: chA.id, n: hubA.n + 1, kind: 'fail', htlcId: id, sig: 'ab'.repeat(65), nextRev: 'ab'.repeat(32) };
+  const id = hubA.states[hubA.n].htlcs.find((h) => h.hash === i3.h).id; chain.height += 65; const s0 = snapshot(HUB); const failMsg = { t: 'update', id: chA.id, n: hubA.n + 1, kind: 'fail', htlcId: id, sig: 'ab'.repeat(65), nextRev: 'ab'.repeat(32) };
   await HUB.peer.onMessage(A.pub, failMsg); t('a fail for an HTLC whose preimage the receiver holds is refused, even after the expiry', snapshot(HUB) === s0 && hubA.states[hubA.n].htlcs.some((h) => h.id === id)); }
 
 // ---- a hub restart between the forward and the settle: the forward is on the channel document, so the settle still comes back
-{ const chB2 = B.channels.find((c) => c.id === chB.id); const { preimage: p4, inv: i4 } = B.peer.invoice(3000, 'restart', [HUB.pub]); B.invoices.set(i4.h, { preimage: p4, amount: 3000 }); chain.height -= 90;
+{ const chB2 = B.channels.find((c) => c.id === chB.id); const { preimage: p4, inv: i4 } = B.peer.invoice(3000, 'restart', [HUB.pub]); B.invoices.set(i4.h, { preimage: p4, amount: 3000 }); chain.height -= 130;
   // clean slate on A–hub: settle the stuck direct HTLC first
   await HUB.peer.tick(); await pump(); // the hub's own settle of the direct HTLC was pending; the tick sends it again
-  await A.peer.addHtlc(chA, { amount: 3010, hash: i4.h, expiry: chain.height + 40, route: { to: B.pub } }); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await A.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await HUB.peer.onMessage(rev.from, rev.body); }
+  await A.peer.addHtlc(chA, { amount: 3010, hash: i4.h, expiry: chain.height + 60, route: { to: B.pub } }); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await A.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await HUB.peer.onMessage(rev.from, rev.body); }
   const fwd = inbox.find((m) => m.body.t === 'update' && m.body.kind === 'add'); t('the hub forwarded downstream before the restart', !!fwd);
   const HUB2 = host('hub2', { hub: true }, { key: HUB.key, channels: HUB.channels, invoices: HUB.invoices }); peers[HUB.pub] = HUB2; // the same node, restarted from its file
   await pump(); await settle();
@@ -135,7 +135,7 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
 // ---- a state leaving the funder no fee is refused and rejected; an out-of-range secret is dropped, not thrown
 { const X = host('X2'), Y = host('Y2'); const chX = await X.peer.openChannel(Y.pub, 50000); await pump(); confirm(chX.id); const chY = Y.channels[0];
   const s = { balA: 0, balB: 50000, htlcs: [] }; const sig = C.signFunding(chX, X.peer.theirCommitAt(chX, 1, s).tx, X.key); const s0 = snapshot(Y);
-  await Y.peer.onMessage(X.pub, { t: 'update', id: chX.id, n: 1, kind: 'pay', amount: 50000, sig, nextRev: signer.pubkeyOf('77'.repeat(32)) });
+  await Y.peer.onMessage(X.pub, { t: 'update', id: chX.id, n: 1, kind: 'pay', amount: 50000, sig, nextRev: signer.pubkeyOf('77'.repeat(32)), nextRevPop: C.popSign('77'.repeat(32), `${chX.id}/a/2`) });
   t('a hand-signed state that leaves the funder no fee is refused, the channel untouched, and a reject sent back', snapshot(Y) === s0 && inbox.some((m) => m.body.t === 'reject' && m.to === X.pub), `changed ${snapshot(Y) !== s0} inbox ${inbox.map((m) => m.body.t)}`); inbox.length = 0;
   let threw = false; try { await Y.peer.onMessage(X.pub, { t: 'revoke', id: chX.id, n: 1, reveal: 'ff'.repeat(32) }); await Y.peer.onMessage(X.pub, { t: 'sync', id: chX.id, n: 1, reveal: 'ff'.repeat(32), status: 'open' }); await Y.peer.onMessage(X.pub, { t: 'ack', id: chX.id, n: 1, sig: 'ab'.repeat(65), reveal: 'ff'.repeat(32), nextRev: 'ab'.repeat(32) }); } catch { threw = true; }
   t('an out-of-range revocation secret in a revoke, a sync or an ack is dropped without an exception', !threw && chY.n === 0); inbox.length = 0;
@@ -162,7 +162,7 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
   const hubU = H2.channels.find((c) => c.id === chU.id), hubV = H2.channels.find((c) => c.id === chV.id);
   const { preimage: pv, inv: ivv } = V.peer.invoice(5000, 'v', [H2.pub]); V.invoices.set(ivv.h, { preimage: pv, amount: 5000 }); const expiry = chain.height + 60;
   await U.peer.addHtlc(chU, { amount: 5010, hash: ivv.h, expiry, route: { to: V.pub } }); { const upd = inbox.shift(); await H2.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await U.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await H2.peer.onMessage(rev.from, rev.body); }
-  { const fwd = inbox.shift(); t('the hub forwards with the expiry cut by margin + delay + 3', fwd.body.kind === 'add' && fwd.body.htlc.expiry === expiry - (EXPIRY_MARGIN + 6 + 3), `expiry ${fwd.body.htlc?.expiry} vs ${expiry}`); await V.peer.onMessage(fwd.from, fwd.body); const ack = inbox.shift(); await H2.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await V.peer.onMessage(rev.from, rev.body); await new Promise((r) => setTimeout(r, 150)); inbox.length = 0; }
+  { const fwd = inbox.shift(); t('the hub forwards with the expiry cut by margin + both delays + 3', fwd.body.kind === 'add' && fwd.body.htlc.expiry === expiry - (EXPIRY_MARGIN + 6 + 3 + 6), `expiry ${fwd.body.htlc?.expiry} vs ${expiry}`); await V.peer.onMessage(fwd.from, fwd.body); const ack = inbox.shift(); await H2.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await V.peer.onMessage(rev.from, rev.body); await new Promise((r) => setTimeout(r, 150)); inbox.length = 0; }
   t('V holds the preimage and its settle to the hub is lost; the hub still has the HTLC downstream and upstream', chV.pending?.m.kind === 'settle' && H2.peer.htlcs(hubV).some((h) => h.hash === ivv.h) && H2.peer.htlcs(hubU).some((h) => h.hash === ivv.h));
   await V.peer.forceClose(chV); const fcHex = chain.broadcasts.at(-1).hex; const fc = C.decode(fcHex);
   await H2.peer.onSpend(hubV, { txid: C.txid(fc), height: chain.height, hex: fcHex }); t('the hub sees V\'s close as the current state and waits: its offered HTLC is not expired and it has no preimage', hubV.status === 'closed-theirs' && !H2.peer.knownPreimage(hubV, ivv.h));
@@ -175,4 +175,60 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
   // the ack is lost; U's tick sends the update again with a fresh signature; the hub acknowledges again rather than ignoring it
   inbox.length = 0; chU.pending.at -= 1000; await U.peer.tick(); await pump();
   t('an update sent again with a fresh signature is acknowledged again: both sides reach the state', !chU.pending && chU.n === hubU.n && chU.n >= 3 && hubU.states[3].htlcs.some((h) => h.id === 2), `pending ${!!chU.pending} n ${chU.n}/${hubU.n}`); }
+// ================= round three =================
+// ---- rogue keys: a revocation point without a proof of its secret is refused, in an open and in an update
+{ const X = host('X4'), Y = host('Y4'); const chX = await X.peer.openChannel(Y.pub, 50000); await pump(); confirm(chX.id); const chY = Y.channels[0];
+  // an open whose basepoint is a point chosen to cancel the other side's (its secret unknown, so its proof is forged with another secret)
+  const open = { t: 'open', id: '2'.repeat(16), funding: { txid: '2'.repeat(64), vout: 0, value: 50000 }, push: 0, delay: 6, fee: 300, a: X.pub, b: Y.pub, rev: [signer.pubkeyOf('51'.repeat(32)), signer.pubkeyOf('52'.repeat(32))], revBase: signer.pubkeyOf('53'.repeat(32)), pop: { base: C.popSign('54'.repeat(32), `${'2'.repeat(16)}/a/base`), rev: [C.popSign('51'.repeat(32), `${'2'.repeat(16)}/a/0`), C.popSign('52'.repeat(32), `${'2'.repeat(16)}/a/1`)] } };
+  const n0 = Y.channels.length; await Y.peer.onMessage(X.pub, open); t('an open whose basepoint comes with a proof by another secret is refused', Y.channels.length === n0);
+  // an update whose next point is announced with a proof by another secret: rejected, the sender's state set aside
+  const s1 = { balA: 49000, balB: 1000, htlcs: [] }; const sig = C.signFunding(chX, X.peer.theirCommitAt(chX, 1, s1).tx, X.key); const s0 = snapshot(Y); inbox.length = 0;
+  await Y.peer.onMessage(X.pub, { t: 'update', id: chX.id, n: 1, kind: 'pay', amount: 1000, sig, nextRev: signer.pubkeyOf('61'.repeat(32)), nextRevPop: C.popSign('62'.repeat(32), `${chX.id}/a/2`) });
+  t('an update whose next revocation point lacks a valid proof is rejected and nothing is kept', snapshot(Y) === s0 && inbox.some((m) => m.body.t === 'reject' && /proof/.test(m.body.reason)), inbox.map((m) => m.body.t + ':' + m.body.reason).join());
+  t('a point off the curve is refused the same way (no exception)', (await (async () => { try { await Y.peer.onMessage(X.pub, { t: 'update', id: chX.id, n: 1, kind: 'pay', amount: 1000, sig, nextRev: '00'.repeat(32), nextRevPop: 'ab'.repeat(64) }); return true; } catch { return false; } })()) && chY.n === 0); inbox.length = 0;
+  // the delay floor: a host that wants 6 refuses an open at 3, and the shape check refuses below the protocol minimum
+  const Z = host('Z4', { minDelay: 6 }); const chZ = { t: 'open', id: '3'.repeat(16), funding: { txid: '3'.repeat(64), vout: 0, value: 50000 }, push: 0, delay: 3, fee: 300, a: X.pub, b: Z.pub, rev: [chX.myRevPub[0], chX.myRevPub[1]], revBase: chX.myRevBasePub, pop: { base: C.popSign(chX.myRevBase, `${'3'.repeat(16)}/a/base`), rev: [C.popSign(chX.myRev[0], `${'3'.repeat(16)}/a/0`), C.popSign(chX.myRev[1], `${'3'.repeat(16)}/a/1`)] } };
+  await Z.peer.onMessage(X.pub, chZ); t('the delay floor is enforced: a host wanting 6 refuses an open at 3, and delay 2 is malformed', Z.channels.length === 0 && Z.peer.wellFormed({ ...chZ, delay: 2 }) != null && Z.peer.wellFormed(chZ) == null); inbox.length = 0; }
+
+// ---- after a force close no acknowledgement can draw a revocation out of me; a reorganised close of mine goes back to the mempool, not to 'open'
+{ const X = host('X5'), Y = host('Y5'); const chX = await X.peer.openChannel(Y.pub, 50000); await pump(); confirm(chX.id); const chY = Y.channels[0];
+  await X.peer.pay(chX, 1000); await pump(); await X.peer.pay(chX, 500); { const upd = inbox.shift(); await Y.peer.onMessage(upd.from, upd.body); } // Y acks 2, the ack is still in flight
+  await X.peer.forceClose(chX, 1); t('a force close with an update pending sets the pending aside and remembers the signed state', !chX.pending && (chX.signedAlt?.[2] ?? []).length === 1 && chX.status === 'force-closing');
+  const ack = inbox.shift(); inbox.length = 0; await X.peer.onMessage(ack.from, ack.body);
+  t('the late acknowledgement is ignored: state 1 stays, no revocation of it goes out', chX.n === 1 && inbox.length === 0 && !Y.channels[0].theirRev[1]);
+  await Y.peer.onMessage(X.pub, { t: 'sync', id: chX.id, n: 2, status: 'open', pendingN: null, missing: [1] }); // a sync asking for state 1's secret
+  t('a sync asking for the secret of the published state gets nothing', !inbox.some((m) => m.to === Y.pub && m.body.reveals && Object.keys(m.body.reveals).length) && !inbox.some((m) => m.to === Y.pub && m.body.reveal)); inbox.length = 0;
+  const fcHex = chain.broadcasts.at(-1).hex; const fc = C.decode(fcHex); await X.peer.onSpend(chX, { txid: C.txid(fc), height: chain.height, hex: fcHex });
+  t('my commitment in a block: closed-mine', chX.status === 'closed-mine');
+  X.peer.unSpend(chX); t('the block is reorganised away: back to force-closing with the commitment queued for sending again, never to open', chX.status === 'force-closing' && chX.unsent.some((u) => u.txid === chX.closeTxid) && !chX.spentBy);
+  await X.peer.tick(); await X.peer.onSpend(chX, { txid: C.txid(fc), height: chain.height + 1, hex: fcHex }); t('when it is mined again the close is recognised as mine', chX.status === 'closed-mine' && chX.spentBy.height === chain.height + 1); }
+
+// ---- a reject answers one attempt: a stale one is ignored; an acknowledgement of a state I set aside is adopted, since my signature was binding
+{ const X = host('X6'), Y = host('Y6'); const chX = await X.peer.openChannel(Y.pub, 50000); await pump(); confirm(chX.id); const chY = Y.channels[0];
+  await X.peer.pay(chX, 100); const sigA = chX.pending.sig; inbox.length = 0;
+  await X.peer.onMessage(Y.pub, { t: 'reject', id: chX.id, n: 1, sig: 'ab'.repeat(65), reason: 'stale' }); t('a reject that does not carry my update\'s signature is ignored', chX.pending?.sig === sigA);
+  await X.peer.onMessage(Y.pub, { t: 'reject', id: chX.id, n: 1, sig: sigA, reason: 'test' }); t('the reject for this attempt sets it aside', !chX.pending && (chX.signedAlt?.[1] ?? []).length === 1);
+  // Y meanwhile did accept the update (the reject was a lie or a race): its ack arrives for a state X has set aside
+  await Y.peer.onMessage(X.pub, { t: 'update', id: chX.id, n: 1, kind: 'pay', amount: 100, sig: sigA, nextRev: chX.myRevPub[2], nextRevPop: C.popSign(chX.myRev[2], `${chX.id}/a/2`) }); const ack = inbox.find((m) => m.body.t === 'ack'); inbox.length = 0;
+  await X.peer.onMessage(ack.from, ack.body); await pump();
+  t('the acknowledgement of the set-aside state is adopted, the revocation sent, both sides at state 1 with the same balances', chX.n === 1 && chY.n === 1 && chX.states[1].balA === chY.states[1].balA && !!chY.theirRev[0] && X.notes.some((x) => /applied after all/.test(x)), `n ${chX.n}/${chY.n} notes ${X.notes.length}`); }
+
+// ---- a cooperative close crossing an update: the update is rejected, the close is answered on the resync; a force close after a close asked still recognises the cooperative one
+{ const X = host('X7'), Y = host('Y7'); const chX = await X.peer.openChannel(Y.pub, 50000, 5000); await pump(); confirm(chX.id); const chY = Y.channels[0];
+  await X.peer.closeChannel(chX); await Y.peer.pay(chY, 1000); // both at once: X asks a close, Y proposes an update
+  await pump(); await pump();
+  t('the update is rejected because a close is signed, Y sets it aside, and the close goes through on the resync', ['closing', 'closed'].includes(chY.status) && ['closing-asked', 'closing', 'closed'].includes(chX.status) && !chY.pending && chain.broadcasts.some((b) => b.what.startsWith('cooperative close of ' + chX.id)), `X ${chX.status} Y ${chY.status} pending ${!!chY.pending}`);
+  const coop = chain.broadcasts.find((b) => b.what.startsWith('cooperative close of ' + chX.id)); const coopTx = C.decode(coop.hex);
+  await X.peer.forceClose(chX); t('a force close after the close was asked is allowed (the other side may be gone)', chX.status === 'force-closing');
+  await X.peer.onSpend(chX, { txid: C.txid(coopTx), height: chain.height, hex: coop.hex }); t('when the cooperative close lands instead, it is recognised as the close, not as an unknown spend', chX.status === 'closed'); }
+
+// ---- the hub closes a downstream channel past its expiry even while its own fail is pending, so the payee cannot claim late with the preimage
+{ const H3 = host('hub3c', { hub: true }), U = host('U3'), V = host('V3'); const chU = await U.peer.openChannel(H3.pub, 100000); await pump(); confirm(chU.id); const chV = await V.peer.openChannel(H3.pub, 100000, 50000); await pump(); confirm(chV.id);
+  const hubU = H3.channels.find((c) => c.id === chU.id), hubV = H3.channels.find((c) => c.id === chV.id);
+  const { preimage: pv, inv: ivv } = V.peer.invoice(5000, 'v', [H3.pub]); const expiry = chain.height + 60;
+  await U.peer.addHtlc(chU, { amount: 5010, hash: ivv.h, expiry, route: { to: V.pub } }); { const upd = inbox.shift(); await H3.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await U.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await H3.peer.onMessage(rev.from, rev.body); }
+  { const fwd = inbox.shift(); await V.peer.onMessage(fwd.from, fwd.body); const ack = inbox.shift(); await H3.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await V.peer.onMessage(rev.from, rev.body); await new Promise((r) => setTimeout(r, 150)); inbox.length = 0; }
+  t('V holds the HTLC without an invoice for it and goes quiet', H3.peer.htlcs(hubV).some((h) => h.hash === ivv.h) && !V.invoices.get(ivv.h));
+  const downH = H3.peer.htlcs(hubV).find((h) => h.hash === ivv.h); chain.height = downH.expiry + 1; await H3.peer.tick(); t('past the downstream expiry the hub\'s fail is pending, unanswered', hubV.pending?.m.kind === 'fail');
+  await H3.router.tick(); t('the router still closes the downstream channel so the chain decides', hubV.status === 'force-closing', `status ${hubV.status}`); inbox.length = 0; }
 console.log(`\n${ok} passed, ${bad} failed`); process.exit(bad ? 1 : 0);
