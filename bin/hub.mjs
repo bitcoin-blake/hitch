@@ -35,4 +35,4 @@ async function watch() { try { height = await rpc('getblockcount'); } catch (e) 
       if (!ch.fundedHeight) continue; if (ch.spentBy) { if (['closed-mine', 'closed-theirs'].includes(ch.status)) await peer.afterClose(ch); continue; }
       for (let h = ch.fundedHeight; h <= height; h++) { const b = await rpc('getblock', await rpc('getblockhash', h), 2); const tx = b.tx.find((t) => t.vin.some((i) => i.txid === ch.funding.txid && i.vout === ch.funding.vout)); if (tx) { await peer.onSpend(ch, { txid: tx.txid, height: h, hex: tx.hex }); break; } }
     } catch (e) { log(`ERR watch ${ch.id}:`, e.message); } } }
-await watch(); setInterval(watch, POLL * 1000);
+await watch(); setInterval(watch, POLL * 1000); setTimeout(() => peer.resyncAll().catch((e) => log('ERR resync:', e.message)), 3000); setInterval(() => peer.tick().catch((e) => log('ERR tick:', e.message)), 30000);

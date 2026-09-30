@@ -12,7 +12,7 @@ function host(name, { hub = false } = {}) { const key = signer.randomKey(), pub 
   const io = { myScript: '5120' + pub, height: () => chain.height, save: () => {}, log: (s, c) => { if (process.env.VERBOSE || c === 'e') console.log(`    [${name}] ${s}`); }, notify: () => {},
     send: async (ch, body) => { inbox.push({ to: ch.peer, from: pub, body }); }, broadcast: async (hex, what) => { chain.broadcasts.push({ from: name, hex, what }); return 1; },
     buildFunding: async (amount, spk) => { const txid = hash.bytesToHex(hash.sha256(new TextEncoder().encode(name + (++n) + Math.random()))); return { txid, vout: 0, hex: '00' }; } };
-  const peer = makePeer({ C, signer, hash, pub, key, channels, io, opts: { delay: 6, fee: 300, hubFee: 10 } }); const router = makeRouter({ peer, io, invoices, hub }); io.onUpdate = router.onUpdate;
+  const peer = makePeer({ C, signer, hash, pub, key, channels, io, opts: { delay: 6, fee: 300, hubFee: 10, pendingTimeout: 0 } }); const router = makeRouter({ peer, io, invoices, hub }); io.onUpdate = router.onUpdate;
   return peers[pub] = { name, pub, key, peer, invoices, channels, io }; }
 async function pump() { let guard = 0; while (inbox.length && guard++ < 200) { const m = inbox.shift(); await peers[m.to].peer.onMessage(m.from, m.body); } }
 const A = host('A'), HUB = host('hub', { hub: true }), B = host('B');
@@ -49,4 +49,27 @@ const chA2 = await A.peer.openChannel(HUB.pub, 50000); await pump(); confirm(chA
 await A.peer.forceClose(chA2); const fc = chain.broadcasts.at(-1); const fcTx = C.decode(fc.hex); t('a forced close publishes my latest commitment, valid under the interpreter', C.verifyTx(fcTx, [C.fundingPrevout(chA2)]).ok === true && chA2.status === 'force-closing');
 await A.peer.onSpend(chA2, { txid: C.txid(fcTx), height: chain.height, hex: fc.hex }); const n1 = chain.broadcasts.length; chain.height += 6; await A.peer.afterClose(chA2);
 t('after the delay the to_local is swept to my key and the channel is closed', chain.broadcasts.length === n1 + 1 && chA2.status === 'closed' && (() => { const c = A.peer.myCommitAt(chA2, chA2.n); const sw = C.decode(chain.broadcasts.at(-1).hex); return C.verifyTx(sw, [{ value: c.tx.outputs[0].value, scriptPubKey: c.toLocal.spk }]).ok === true; })());
+// ---- resync: lost messages and a collision, on a fresh channel between A and the hub
+const chR = await A.peer.openChannel(HUB.pub, 60000, 20000); await pump(); confirm(chR.id); const hubR = HUB.channels.find((c) => c.id === chR.id);
+const drop = (t) => { const i = inbox.findIndex((m) => m.body.t === t); if (i >= 0) inbox.splice(i, 1); };
+// the ack is lost: A stays pending at 1, the hub is at 1; a resync brings the ack again
+await A.peer.pay(chR, 1000); await pump(); // update reaches the hub, which acks
+// simulate the loss: rewind A to before the ack by dropping it before delivery
+await A.peer.pay(chR, 1000); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); drop('ack'); }
+t('with the acknowledgement lost, A is pending at 2 and the hub is at 2', chR.n === 1 && chR.pending?.n === 2 && hubR.n === 2);
+await A.peer.resyncAll(); await pump();
+t('a resync brings the acknowledgement again and A catches up, the revocation exchanged', chR.n === 2 && !chR.pending && hubR.n === 2 && chR.theirRev[1] && hubR.theirRev[1]);
+// the update is lost: the tick sends it again
+await A.peer.pay(chR, 500); drop('update'); await pump(); t('with the update lost the hub knows nothing and A is pending', hubR.n === 2 && chR.pending?.n === 3);
+chR.pending.at -= 1000; await A.peer.tick(); await pump(); t('the tick sends the update again and it completes', chR.n === 3 && hubR.n === 3 && !chR.pending);
+// the revoke is lost: the next resync carries the secret
+await A.peer.pay(chR, 500); { const upd = inbox.shift(); await HUB.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await A.peer.onMessage(ack.from, ack.body); drop('revoke'); }
+t('with the revoke lost the hub lacks A\'s secret for state 3', chR.n === 4 && hubR.n === 4 && !hubR.theirRev[3]);
+await A.peer.resyncAll(); await pump(); t('a resync carries the secret; the hub can now punish state 3', !!hubR.theirRev[3]);
+// a collision: both propose state 5 at once; the lower key's stands, the other's is retried by its tick
+await A.peer.pay(chR, 100); await HUB.peer.pay(hubR, 200); await pump(); const lower = A.pub < HUB.pub ? 'A' : 'hub';
+t(`both proposed at once: ${lower}'s update stood and the other side dropped its own`, chR.n === 5 && hubR.n === 5 && chR.states[5].balA === hubR.states[5].balA && (lower === 'A' ? chR.states[5].balA === chR.states[4].balA - 100 : chR.states[5].balA === chR.states[4].balA + 200) && !chR.pending && !hubR.pending);
+await A.peer.tick(); await HUB.peer.tick(); await pump();
+t('the dropped update is sent again after and completes as state 6', chR.n === 6 && hubR.n === 6 && chR.states[6].balA === chR.states[4].balA - 100 + 200);
+t('every commitment still verifies after the resyncs', [A, HUB].every((p) => p.channels.filter((c) => c.id === chR.id).every((c) => { const my = p.peer.myCommitAt(c, c.n); my.tx.witness = [C.fundingWitness(c, { [p.pub]: C.signFunding(c, my.tx, p.key), [c.peer]: c.sigs[c.n] })]; return C.verifyTx(my.tx, [C.fundingPrevout(c)]).ok === true; })));
 console.log(`\n${ok} passed, ${bad} failed`); process.exit(bad ? 1 : 0);

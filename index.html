@@ -110,6 +110,8 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
   <label>Relays:</label><div><textarea id="o-relays"></textarea><div class="note">channel messages and transactions are published to each; the same relays are followed for messages to this node</div></div>
   <label>Delay:</label><div class="row"><input id="o-delay" type="number" min="1" max="1000" style="width:90px;flex:none"><span>blocks before a forced close pays its owner; the other side may punish a revoked close within it</span></div>
   <label>Fee:</label><div class="row"><input id="o-fee" type="number" min="100" step="1" style="width:90px;flex:none"><span>sat per channel transaction, paid by the funder</span></div>
+  <label>Backup:</label><div class="row"><button class="q" id="o-export">Export channels…</button><label class="q" style="cursor:pointer;padding:3px 10px;border:1px solid #9a9a9a;border-radius:3px;background:#f4f4f4">Import… <input type="file" id="o-import" accept="application/json" style="display:none"></label><span class="note" id="o-note"></span></div>
+  <label></label><div class="note">The channel documents hold the signed commitments and the revocation secrets. Losing them means the other side can close at any signed state and cannot be punished for an old one; export after every session that changed something, and keep the file where only you can read it.</div>
   <label>Snapshot URL:</label><input id="o-snapshot" class="mono"><label>Blocks URL:</label><input id="o-blocks" class="mono">
 </div></div></div><div class="f"><button id="o-cancel">Cancel</button><button id="o-ok">OK</button></div></dialog>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
