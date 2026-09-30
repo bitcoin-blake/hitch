@@ -196,8 +196,8 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
   await X.peer.forceClose(chX, 1); t('a force close with an update pending sets the pending aside and remembers the signed state', !chX.pending && (chX.signedAlt?.[2] ?? []).length === 1 && chX.status === 'force-closing');
   const ack = inbox.shift(); inbox.length = 0; await X.peer.onMessage(ack.from, ack.body);
   t('the late acknowledgement is ignored: state 1 stays, no revocation of it goes out', chX.n === 1 && inbox.length === 0 && !Y.channels[0].theirRev[1]);
-  await Y.peer.onMessage(X.pub, { t: 'sync', id: chX.id, n: 2, status: 'open', pendingN: null, missing: [1] }); // a sync asking for state 1's secret
-  t('a sync asking for the secret of the published state gets nothing', !inbox.some((m) => m.to === Y.pub && m.body.reveals && Object.keys(m.body.reveals).length) && !inbox.some((m) => m.to === Y.pub && m.body.reveal)); inbox.length = 0;
+  await X.peer.onMessage(Y.pub, { t: 'sync', id: chX.id, n: 2, status: 'open', pendingN: null, missing: [1] }); // a sync asking X for state 1's secret
+  t('a sync asking for the secret of the published state 1 gets state 0\'s (revoked, harmless) and never state 1\'s', inbox.some((m) => m.to === Y.pub && m.body.t === 'synced' && m.body.reveal === chX.myRev[0]) && !inbox.some((m) => m.to === Y.pub && (m.body.reveal === chX.myRev[1] || Object.values(m.body.reveals ?? {}).includes(chX.myRev[1]))), inbox.map((m) => m.body.t + ':' + JSON.stringify(m.body.reveals) + ':' + (m.body.reveal === chX.myRev[1] ? 'STATE1' : m.body.reveal === chX.myRev[0] ? 'state0' : m.body.reveal)).join()); inbox.length = 0;
   const fcHex = chain.broadcasts.at(-1).hex; const fc = C.decode(fcHex); await X.peer.onSpend(chX, { txid: C.txid(fc), height: chain.height, hex: fcHex });
   t('my commitment in a block: closed-mine', chX.status === 'closed-mine');
   X.peer.unSpend(chX); t('the block is reorganised away: back to force-closing with the commitment queued for sending again, never to open', chX.status === 'force-closing' && chX.unsent.some((u) => u.txid === chX.closeTxid) && !chX.spentBy);
@@ -220,7 +220,7 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
   t('the update is rejected because a close is signed, Y sets it aside, and the close goes through on the resync', ['closing', 'closed'].includes(chY.status) && ['closing-asked', 'closing', 'closed'].includes(chX.status) && !chY.pending && chain.broadcasts.some((b) => b.what.startsWith('cooperative close of ' + chX.id)), `X ${chX.status} Y ${chY.status} pending ${!!chY.pending}`);
   const coop = chain.broadcasts.find((b) => b.what.startsWith('cooperative close of ' + chX.id)); const coopTx = C.decode(coop.hex);
   await X.peer.forceClose(chX); t('a force close after the close was asked is allowed (the other side may be gone)', chX.status === 'force-closing');
-  await X.peer.onSpend(chX, { txid: C.txid(coopTx), height: chain.height, hex: coop.hex }); t('when the cooperative close lands instead, it is recognised as the close, not as an unknown spend', chX.status === 'closed'); }
+  await X.peer.onSpend(chX, { txid: C.txid(coopTx), height: chain.height, hex: coop.hex }); t('when the cooperative close lands instead, it is recognised as the close, not as an unknown spend, and is final at depth', chX.status === 'closed-coop' && (chain.height += 6, await X.peer.afterClose(chX), chX.status === 'closed')); }
 
 // ---- the hub closes a downstream channel past its expiry even while its own fail is pending, so the payee cannot claim late with the preimage
 { const H3 = host('hub3c', { hub: true }), U = host('U3'), V = host('V3'); const chU = await U.peer.openChannel(H3.pub, 100000); await pump(); confirm(chU.id); const chV = await V.peer.openChannel(H3.pub, 100000, 50000); await pump(); confirm(chV.id);
@@ -231,4 +231,46 @@ t('after the expiry the offerer can fail the upstream HTLC when the hub has no p
   t('V holds the HTLC without an invoice for it and goes quiet', H3.peer.htlcs(hubV).some((h) => h.hash === ivv.h) && !V.invoices.get(ivv.h));
   const downH = H3.peer.htlcs(hubV).find((h) => h.hash === ivv.h); chain.height = downH.expiry + 1; await H3.peer.tick(); t('past the downstream expiry the hub\'s fail is pending, unanswered', hubV.pending?.m.kind === 'fail');
   await H3.router.tick(); t('the router still closes the downstream channel so the chain decides', hubV.status === 'force-closing', `status ${hubV.status}`); inbox.length = 0; }
+// ================= round four =================
+// ---- a set-aside forward is not dead: the hub keeps the upstream HTLC until nothing binds the hash, and kills the alternative by closing before its deadline
+{ const H4 = host('hub4', { hub: true }), U = host('U4'), V = host('V4'); const chU = await U.peer.openChannel(H4.pub, 100000); await pump(); confirm(chU.id); const chV = await V.peer.openChannel(H4.pub, 100000, 50000); await pump(); confirm(chV.id);
+  const hubU = H4.channels.find((c) => c.id === chU.id), hubV = H4.channels.find((c) => c.id === chV.id);
+  const { preimage: pv, inv: ivv } = V.peer.invoice(5000, 'v', [H4.pub]); V.invoices.set(ivv.h, { preimage: pv, amount: 5000 }); const expiry = chain.height + 60;
+  await U.peer.addHtlc(chU, { amount: 5010, hash: ivv.h, expiry, route: { to: V.pub } }); { const upd = inbox.shift(); await H4.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await U.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await H4.peer.onMessage(rev.from, rev.body); }
+  const fwd = inbox.shift(); t('the hub forwarded to V (pending)', fwd.body.kind === 'add' && hubV.pending?.n === 1);
+  // V rejects the forward, naming its signature; the hub sets it aside
+  await H4.peer.onMessage(V.pub, { t: 'reject', id: chV.id, n: 1, sig: fwd.body.sig, reason: 'no thanks' }); await new Promise((r) => setTimeout(r, 100));
+  t('the hub set the forward aside but the hash is still bound by the state V holds a signature on, so the upstream HTLC stays', !hubV.pending && H4.peer.bound(hubV, ivv.h) === 'alt' && H4.peer.htlcs(hubU).some((h) => h.hash === ivv.h) && !!hubV.forwards?.[ivv.h], `bound ${H4.peer.bound(hubV, ivv.h)} up ${H4.peer.htlcs(hubU).length} fwd ${JSON.stringify(hubV.forwards)}`);
+  await H4.router.tick(); t('a tick well before the upstream deadline changes nothing', hubV.status === 'open' && H4.peer.htlcs(hubU).some((h) => h.hash === ivv.h));
+  // V publishes the set-aside state and claims with the preimage on the chain: the hub reads it and settles upstream
+  await V.peer.onMessage(fwd.from, fwd.body); { const ack = inbox.find((m) => m.body.t === 'ack'); inbox.length = 0; await H4.peer.onMessage(ack.from, ack.body); } // V acks late after all: adopted
+  t('V acknowledged the set-aside state late; the hub adopted it and the forward is in the agreed state', hubV.n === 1 && H4.peer.htlcs(hubV).some((h) => h.hash === ivv.h) && H4.peer.bound(hubV, ivv.h) === 'state');
+  await settle(); t('V settles with the preimage and the hub carries it upstream: U paid, the hub kept its fee', H4.peer.htlcs(hubU).length === 0 && hubU.states[hubU.n].balB === 5010 && chV.states[chV.n].balA === 55000, `up ${H4.peer.htlcs(hubU).length} balB ${hubU.states[hubU.n].balB} V ${chV.states[chV.n].balA}`);
+  // the same again, but V never acks: near the upstream deadline the hub closes the downstream channel, and only once that close is in a block is the upstream failed
+  const { inv: i2 } = V.peer.invoice(4000, 'w', [H4.pub]); const e2 = chain.height + 60;
+  await U.peer.addHtlc(chU, { amount: 4010, hash: i2.h, expiry: e2, route: { to: V.pub } }); { const upd = inbox.shift(); await H4.peer.onMessage(upd.from, upd.body); const ack = inbox.shift(); await U.peer.onMessage(ack.from, ack.body); const rev = inbox.shift(); await H4.peer.onMessage(rev.from, rev.body); }
+  const fwd2 = inbox.shift(); await H4.peer.onMessage(V.pub, { t: 'reject', id: chV.id, n: hubV.n + 1, sig: fwd2.body.sig, reason: 'no' }); inbox.length = 0;
+  chain.height = e2 - 6 - 3 - 6; await H4.router.tick(); t('at the deadline the hub closes the downstream channel to kill the set-aside state', hubV.status === 'force-closing', `status ${hubV.status} bound ${H4.peer.bound(hubV, i2.h)}`);
+  const fcHex = chain.broadcasts.at(-1).hex; const fc = C.decode(fcHex); await H4.peer.onSpend(hubV, { txid: C.txid(fc), height: chain.height, hex: fcHex });
+  await H4.router.tick(); await settle(); t('with its close in a block nothing binds the hash: the upstream HTLC is failed and U refunded', H4.peer.htlcs(hubU).length === 0 && chU.states[chU.n].balA === 100000 - 5010, `up ${H4.peer.htlcs(hubU).length} U ${chU.states[chU.n].balA}`); }
+
+// ---- a reject that names a resent update is honoured; an acknowledgement of an earlier attempt at the same state is adopted over the newer pending
+{ const X = host('X8'), Y = host('Y8'); const chX = await X.peer.openChannel(Y.pub, 50000); await pump(); confirm(chX.id); const chY = Y.channels[0];
+  await X.peer.pay(chX, 100); const first = inbox.shift(); chX.pending.at -= 1000; await X.peer.tick(); const again = inbox.find((m) => m.body.t === 'update'); inbox.length = 0;
+  t('a resent update carries the same signature', again.body.sig === first.body.sig);
+  await X.peer.onMessage(Y.pub, { t: 'reject', id: chX.id, n: 1, sig: again.body.sig, reason: 'later' }); t('a reject naming the resent signature clears the pending', !chX.pending); inbox.length = 0;
+  await X.peer.pay(chX, 200); inbox.length = 0; // a second attempt at state 1
+  await Y.peer.onMessage(X.pub, first.body); const ack = inbox.find((m) => m.body.t === 'ack'); inbox.length = 0; // Y in fact took the first attempt
+  await X.peer.onMessage(ack.from, ack.body); await pump();
+  t('the acknowledgement of the first attempt does not fit the second pending: the second is set aside and the first adopted; both sides agree on 100 sat', !chX.pending && chX.n === 1 && chY.n === 1 && chX.states[1].balA === 49900 && chY.states[1].balA === 49900 && (chX.signedAlt?.[1] ?? []).length === 1, `n ${chX.n}/${chY.n} balA ${chX.states[1]?.balA}/${chY.states[1]?.balA}`);
+  // a late acknowledgement cannot be adopted while a cooperative close is asked
+  await X.peer.pay(chX, 50); const upd = inbox.shift(); inbox.length = 0; await Y.peer.onMessage(upd.from, upd.body); const ack2 = inbox.find((m) => m.body.t === 'ack'); inbox.length = 0;
+  await X.peer.onMessage(Y.pub, { t: 'reject', id: chX.id, n: 2, sig: upd.body.sig, reason: 'x' }); await X.peer.closeChannel(chX); inbox.length = 0; await X.peer.onMessage(ack2.from, ack2.body);
+  t('with a close asked at state 1 an acknowledgement of a set-aside state 2 is not adopted', chX.n === 1 && chX.status === 'closing-asked'); inbox.length = 0; }
+
+// ---- an open whose accept was lost is accepted again on the retry; a proposal the hub dropped is taken afresh
+{ const X = host('X9'), Y = host('Y9'); const chX = await X.peer.openChannel(Y.pub, 50000); const open = inbox.shift(); await Y.peer.onMessage(open.from, open.body); inbox.length = 0; // the accept is lost
+  chX.openAt = 0; await X.peer.tick(); const sent = inbox.some((m) => m.body.t === 'open'); await pump();
+  t('the proposal is sent again, the accept comes again, and the channel reaches funding on both sides', sent && chX.status === 'funding' && Y.channels[0].status === 'funding', `sent ${sent} X ${chX.status} Y ${Y.channels[0].status}`);
+  const chY = Y.channels[0]; chY.status = 'abandoned'; await Y.peer.onMessage(X.pub, open.body); t('after the acceptor dropped the proposal, the same open starts it afresh', Y.channels.length === 1 && Y.channels[0].status === 'accepted' && Y.channels[0] !== chY); inbox.length = 0; }
 console.log(`\n${ok} passed, ${bad} failed`); process.exit(bad ? 1 : 0);

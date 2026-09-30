@@ -18,7 +18,7 @@ const POLL = num('--poll', 20, 5, 600), HUB_FEE = num('--fee', 10, 0, 100000), S
 const MAX_PER_PEER = num('--max-per-peer', 4, 1, 1000), MAX_CHANNELS = num('--max-channels', 64, 1, 100000), MAX_UNFUNDED = num('--max-unfunded', 16, 1, 10000), OPEN_RATE = num('--open-rate', 4, 1, 1000), MAX_DELAY = num('--max-delay', 24, 3, 144);
 const STARTED = Date.now();
 if (!KEY_FILE || !RELAYS.length) { console.error('--key-file and --relays (wss://…) are required'); process.exit(2); }
-const STALE_AFTER = 600, ARCHIVE_AFTER = 7 * 24 * 3600; // seconds without a fresh height before HTLC decisions stop; age of a finished channel before it leaves the live file
+const STALE_AFTER = 600, ARCHIVE_AFTER = 7 * 24 * 3600, NEVER_SEEN_AFTER = 2 * 3600, WALK_MAX = 200, CLOSE_DEPTH = 6; // seconds without a fresh height before HTLC decisions stop; age of a finished channel before it leaves the live file
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
 process.on('unhandledRejection', (e) => log('ERR unhandled:', e?.stack ?? e));
 process.on('uncaughtException', (e) => { log('ERR uncaught:', e?.stack ?? e); process.exit(1); });
@@ -41,7 +41,7 @@ const COMMIT = (() => { try { return execSync('git rev-parse --short HEAD', { cw
 let saving = Promise.resolve(), saveWanted = false, saveOk = true;
 const saveNow = async () => { const tmp = `${CH_FILE}.tmp`; if (existsSync(CH_FILE)) await copyFile(CH_FILE, BAK); const fh = await openFile(tmp, 'w', 0o600); try { await fh.writeFile(JSON.stringify(CH)); await fh.sync(); } finally { await fh.close(); } await rename(tmp, CH_FILE); };
 const save = () => { if (saveWanted) return saving; saveWanted = true; saving = saving.then(async () => { saveWanted = false; try { await saveNow(); saveOk = true; return true; } catch (e) { saveOk = false; log('ERR save:', e.message); return false; } }); return saving; };
-const invoices = new Map(); const opens = new Map(); // pubkey → open times in the last hour
+const invoices = new Map(); const opens = new Map(); let declined = 0; // pubkey → accepted open times in the last hour; opens declined since start
 const bg = (f) => (...a) => { f(...a).catch((e) => log('ERR router:', e.message)); };
 const io = { myScript: script, height: () => height ?? 0, stale: () => Date.now() - heightAt > STALE_AFTER * 1000, save, log: (t, c) => log(c === 'e' ? 'ERR' : '·', t), notify: (t, b) => log(`${t}: ${b}`), invoiceFor: (h) => invoices.get(h) ?? null,
   send: async (ch, body) => { const ev = events.signEvent(key, { kind: KIND, tags: [['chain', CHAIN.network], ['p', ch.peer], ['ch', ch.id]], content: JSON.stringify(body) }); const r = await relay.publish({ relays: RELAYS, event: ev }); const ok = Object.values(r).filter((x) => x === 'ok').length; if (!ok) log(`ERR message ${body.t} reached no relay`, JSON.stringify(r)); return ok; },
@@ -49,9 +49,9 @@ const io = { myScript: script, height: () => height ?? 0, stale: () => Date.now(
   buildFunding: async () => { throw new Error('the hub does not fund channels; open one to it, with a push if you want it to pay you back'); },
   // admission: per key, in all, unfunded in all, and per key per hour; the hub funds nothing, so this guards its state and its node, not its coins
   acceptOpen: (from, m) => { const live = CH.filter((c) => LIVE.has(c.status) || c.status === 'unfunded'); const mine = live.filter((c) => c.peer === from).length; const unfunded = live.filter((c) => ['proposed', 'accepted', 'funding', 'unfunded'].includes(c.status)).length;
-    for (const [k2, ts] of opens) { const keep = ts.filter((t) => Date.now() - t < 3600e3); if (keep.length) opens.set(k2, keep); else opens.delete(k2); } const recent = opens.get(from) ?? []; opens.set(from, [...recent, Date.now()]);
+    for (const [k2, ts] of opens) { const keep = ts.filter((t) => Date.now() - t < 3600e3); if (keep.length) opens.set(k2, keep); else opens.delete(k2); } const recent = opens.get(from) ?? [];
     const why = m.delay > MAX_DELAY ? `delay ${m.delay} is above my ceiling of ${MAX_DELAY}` : mine >= MAX_PER_PEER ? `${mine} live channels already` : live.length >= MAX_CHANNELS ? `${live.length} live channels in all` : unfunded >= MAX_UNFUNDED ? `${unfunded} unfunded channels waiting` : recent.length >= OPEN_RATE ? `${recent.length} opens from that key this hour` : io.stale() ? 'my chain view is stale' : null;
-    if (why) log(`open from ${from.slice(0, 12)}… declined: ${why}`); return !why; },
+    if (why) { declined++; log(`open from ${from.slice(0, 12)}… declined: ${why}`); } else opens.set(from, [...recent, Date.now()]); return !why; },
   // the transaction that spent an output, if any: unspent per the node's view, else found by walking the blocks since `from` (the walk remembered per output)
   findSpend: async (ch, { txid, vout }) => { const key2 = `${txid}:${vout}`; const s = ch.scanned?.[key2]; if (s?.found) return s.found; const out = await rpc('gettxout', txid, vout, true); if (out) return null; return spends.get(key2) ?? null; } };
 const peer = makePeer({ C, signer, hash, pub, key, channels: CH, io, opts: { delay: 6, fee: 300, hubFee: HUB_FEE, minDelay: 3, hub: true, proposalTimeout: 1200 } }); const router = makeRouter({ peer, io, invoices, hub: true });
@@ -61,13 +61,14 @@ relay.subscribe({ relays: RELAYS, chainId: CHAIN.network, kind: KIND, verify: ve
 // the chain, through the local node. One walk over every new block serves every watched outpoint: the funding outputs of
 // live channels and the outputs of every close being followed. The cursor (height and block hash) is kept on disk, so a
 // restart continues where it left off, and a block hash that no longer matches means a reorganisation: back up and walk again.
-const CURSOR_FILE = `${DATA}/cursor.json`; let cursor = null; try { if (existsSync(CURSOR_FILE)) cursor = JSON.parse(await readFile(CURSOR_FILE, 'utf8')); } catch {}
+const CURSOR_FILE = `${DATA}/cursor.json`; let cursor = null; try { if (existsSync(CURSOR_FILE) && !restoredFromBak) cursor = JSON.parse(await readFile(CURSOR_FILE, 'utf8')); } catch (e) { log('cursor.json unreadable, walking from the watched set:', e.message); }
 const saveCursor = () => writeFile(CURSOR_FILE, JSON.stringify(cursor), { mode: 0o600 }).catch((e) => log('ERR cursor:', e.message));
 const spends = new Map(); // outpoint → { txid, height, hex } found by the walk for outputs of closes
 const watchedOutpoints = () => { const fund = new Map(), outs = new Map(); for (const ch of CH) { if (!WATCHED.has(ch.status)) continue; if (ch.fundedHeight && !ch.spentBy) fund.set(`${ch.funding.txid}:${ch.funding.vout}`, ch); if (ch.spentBy && ch.outputs) for (const v of Object.keys(ch.outputs)) outs.set(`${ch.spentBy.txid}:${v}`, ch); } return { fund, outs }; };
-async function walkBlock(h) { const hashAt = await rpc('getblockhash', h); const b = await rpc('getblock', hashAt, 2); const { fund, outs } = watchedOutpoints();
-  for (const tx of b.tx) for (const i of tx.vin) { if (!i.txid) continue; const key2 = `${i.txid}:${i.vout}`; const ch = fund.get(key2); if (ch) { try { await peer.onSpend(ch, { txid: tx.txid, height: h, blockHash: hashAt, hex: tx.hex }); } catch (e) { log(`ERR spend of ${ch.id}:`, e.message); } }
-    const co = outs.get(key2); if (co) { const found = { txid: tx.txid, height: h, hex: tx.hex }; spends.set(key2, found); co.scanned ??= {}; co.scanned[key2] = { to: h, found }; } }
+async function walkBlock(h) { const hashAt = await rpc('getblockhash', h); const b = await rpc('getblock', hashAt, 2); let closes = 0;
+  for (let pass = 0; pass < 2; pass++) { const { fund, outs } = watchedOutpoints(); if (pass && !closes) break; closes = 0;
+    for (const tx of b.tx) for (const i of tx.vin) { if (!i.txid) continue; const key2 = `${i.txid}:${i.vout}`; const ch = fund.get(key2); if (ch && !ch.spentBy) { closes++; try { await peer.onSpend(ch, { txid: tx.txid, height: h, blockHash: hashAt, hex: tx.hex }); } catch (e) { log(`ERR spend of ${ch.id}:`, e.message); } }
+      const co = outs.get(key2); if (co) { const found = { txid: tx.txid, height: h, hex: tx.hex }; spends.set(key2, found); co.scanned ??= {}; co.scanned[key2] = { to: h, found }; } } }
   return hashAt; }
 let watching = false;
 async function watch() { if (watching) return; watching = true;
@@ -76,16 +77,25 @@ async function watch() { if (watching) return; watching = true;
     // funding outputs: confirmed with the declared value (open), or gone (the walk finds the spend)
     for (const ch of CH) { if (!WATCHED.has(ch.status)) continue;
       try { const out = await rpc('gettxout', ch.funding.txid, ch.funding.vout, true);
-        if (out && ch.spentBy) { peer.unSpend(ch); }
-        if (out && out.confirmations < CONFS) { ch.conf = out.confirmations; continue; }
+        if (out && ch.spentBy) { for (const k2 of spends.keys()) if (k2.startsWith(ch.spentBy.txid)) spends.delete(k2); peer.unSpend(ch); }
+        if (out) ch.lastUnspent = height;
+        if (out && out.confirmations < CONFS) { ch.conf = out.confirmations; ch.seen = true; continue; }
+        if (!out && !ch.fundedHeight && !ch.spentBy) { // never seen unspent: confirmed and spent while the hub was away, or never existed
+          const t = await rpc('getrawtransaction', ch.funding.txid, true).catch(() => null); if (t?.blockhash) { const bh = await rpc('getblockheader', t.blockhash); ch.fundedHeight = bh.height; ch.seen = true; save(); log(`channel ${ch.id}: the funding is in block ${bh.height} and already spent; walking from there`); }
+          else if (t) ch.seen = true; else if (ch.role === 'b' && ['funding', 'unfunded'].includes(ch.status) && !ch.seen && Date.now() / 1000 - ch.at > NEVER_SEEN_AFTER) { ch.status = 'abandoned'; save(); log(`channel ${ch.id}: the funding was never seen by the node in two hours; abandoned`); }
+          continue; }
         if (out) { const value = Math.round(out.value * 1e8); if (value !== ch.funding.value || out.scriptPubKey?.hex !== ch.funding.spk) { if (ch.status !== 'bad-funding') { ch.status = 'bad-funding'; save(); log(`ERR channel ${ch.id}: the funding output is ${value} sat to ${out.scriptPubKey?.hex?.slice(0, 12)}…, not the ${ch.funding.value} declared; refused`); } continue; }
           if (['funding', 'unfunded'].includes(ch.status)) { ch.status = 'open'; ch.fundedHeight = height - out.confirmations + 1; save(); log(`channel ${ch.id} open: ${ch.funding.value} sat at block ${ch.fundedHeight}`); } else if (!ch.fundedHeight) { ch.fundedHeight = height - out.confirmations + 1; save(); } ch.conf = out.confirmations; continue; }
-        if (ch.spentBy && ch.spentBy.blockHash && height - ch.spentBy.height < 6) { const now2 = await rpc('getblockhash', ch.spentBy.height).catch(() => null); if (now2 && now2 !== ch.spentBy.blockHash) { peer.unSpend(ch); continue; } }
+        if (ch.spentBy && ch.spentBy.blockHash && height - ch.spentBy.height < CLOSE_DEPTH) { const now2 = await rpc('getblockhash', ch.spentBy.height).catch(() => null); if (now2 && now2 !== ch.spentBy.blockHash) { for (const k2 of spends.keys()) if (k2.startsWith(ch.spentBy.txid)) spends.delete(k2); peer.unSpend(ch); continue; } }
+        if (ch.status === 'closed-coop' && ch.spentBy && height - ch.spentBy.height + 1 >= CLOSE_DEPTH) { ch.status = 'closed'; save(); log(`channel ${ch.id}: the cooperative close is ${CLOSE_DEPTH} deep; closed`); }
       } catch (e) { log(`ERR watch ${ch.id}:`, e.message); } }
     // the walk: from the cursor (checked against the chain), or from the oldest thing watched
     const { fund, outs } = watchedOutpoints();
-    if (fund.size || outs.size) { let from; if (cursor && (await rpc('getblockhash', cursor.height).catch(() => null)) === cursor.hash) from = cursor.height + 1; else if (cursor) { from = Math.max(1, cursor.height - 6); log(`block ${cursor.height} is no longer ${cursor.hash.slice(0, 12)}…: walking again from ${from}`); } else from = Math.min(height, ...[...fund.values()].map((c) => c.fundedHeight), ...[...outs.values()].map((c) => c.spentBy.height));
-      for (let h = from; h <= height; h++) { const hashAt = await walkBlock(h); cursor = { height: h, hash: hashAt }; } await saveCursor(); }
+    if (fund.size || outs.size) { let from; if (cursor && (await rpc('getblockhash', cursor.height).catch(() => null)) === cursor.hash) from = cursor.height + 1; else if (cursor) { from = Math.max(1, cursor.height - 6); log(`block ${cursor.height} is no longer ${cursor.hash.slice(0, 12)}…: walking again from ${from}`); } else from = height - 6;
+      // anything watched that the node no longer shows unspent, and that the walk has not covered, pulls the start back to where it was last seen
+      const needs = [...[...fund.values()].filter((c) => (c.lastUnspent ?? 0) < height).map((c) => c.lastUnspent ?? c.fundedHeight), ...[...outs.entries()].filter(([k2, c]) => !c.scanned?.[k2]?.found).map(([, c]) => c.spentBy.height)]; if (needs.length) from = Math.min(from, ...needs);
+      const to = Math.min(height, from + WALK_MAX - 1); if (to < height) log(`walking blocks ${from}–${to} of ${height}`);
+      for (let h = Math.max(1, from); h <= to; h++) { const hashAt = await walkBlock(h); cursor = { height: h, hash: hashAt }; if (h % 50 === 0) await saveCursor(); } await saveCursor(); }
     for (const ch of CH) if (FOLLOWING.has(ch.status) && ch.spentBy) { try { await peer.afterClose(ch); } catch (e) { log(`ERR follow ${ch.id}:`, e.message); } }
     // finished channels leave the live file after a week, to the archive
     const old = CH.filter((c) => TERMINAL.has(c.status) && Date.now() / 1000 - (c.spentBy?.at ?? c.at ?? 0) > ARCHIVE_AFTER); if (old.length) { await appendFile(`${DATA}/archive.jsonl`, old.map((c) => JSON.stringify(c) + '\n').join(''), { mode: 0o600 }); for (const c of old) CH.splice(CH.indexOf(c), 1); save(); log(`${old.length} finished channel(s) moved to the archive`); }
@@ -98,13 +108,13 @@ let ticking = false; setInterval(() => { if (ticking) return; ticking = true; pe
 let statusError = null;
 if (STATUS_PORT) { const sockets = () => { try { return Object.fromEntries([...relay.sockets()].map(([u, open]) => [u, open ? 'open' : 'closed'])); } catch { return {}; } };
   const htlcRows = (c) => peer.htlcs(c).map((h) => ({ id: h.id, hash: h.hash.slice(0, 16), amount: h.amount, offered: h.from === c.role, expiry: h.expiry, blocksLeft: h.expiry - (height ?? 0), preimage: !!peer.knownPreimage(c, h.hash), upstream: c.forwards?.[h.hash]?.up ?? null }));
-  const server = createServer(async (req, res) => {
+  const server = createServer(async (req, res) => { try {
     let unspent = 0, openValue = 0; for (const c of CH) if (c.status === 'open') { openValue += c.funding.value; try { if (await rpc('gettxout', c.funding.txid, c.funding.vout, true)) unspent += c.funding.value; } catch {} }
     const warnings = [...(io.stale() ? ['the chain view is stale'] : []), ...(saveOk ? [] : ['the last save failed']), ...(restoredFromBak ? ['running from the backup copy of the channel file: resync before closing anything'] : []), ...(statusError ? [statusError] : []), ...(unspent !== openValue ? [`open channels hold ${openValue} sat but the node sees ${unspent} sat unspent`] : []),
-      ...CH.flatMap((c) => htlcRows(c).filter((h) => h.blocksLeft <= 12).map((h) => `htlc ${h.id} on ${c.id} has ${h.blocksLeft} blocks left`)), ...CH.filter((c) => c.unsent?.length).map((c) => `${c.id} has ${c.unsent.length} unsent transaction(s)`)];
-    const body = { node: pub, network: CHAIN.network, commit: COMMIT, startedAt: new Date(STARTED).toISOString(), height, heightAgeSeconds: Math.round((Date.now() - heightAt) / 1000), stale: io.stale(), saveOk, restoredFromBak, cursor, fee: HUB_FEE, confs: CONFS, limits: { perPeer: MAX_PER_PEER, channels: MAX_CHANNELS, unfunded: MAX_UNFUNDED, opensPerHour: OPEN_RATE, maxDelay: MAX_DELAY }, relays: sockets(),
+      ...CH.flatMap((c) => htlcRows(c).filter((h) => h.blocksLeft <= 12).map((h) => `htlc ${h.id} on ${c.id} has ${h.blocksLeft} blocks left`)), ...CH.filter((c) => c.unsent?.length).map((c) => `${c.id} has ${c.unsent.length} unsent transaction(s)`), ...(Object.values(sockets()).some((v) => v === 'open') ? [] : ['no relay is connected']), ...CH.filter((c) => ['spent-unknown', 'bad-funding'].includes(c.status)).map((c) => `${c.id} is ${c.status}: look at it`), ...CH.filter((c) => (c.pending?.tries ?? 0) >= 4).map((c) => `${c.id}: update ${c.pending.n} unanswered after ${c.pending.tries} tries`), ...CH.filter((c) => c.status === 'punished' && Object.values(c.outputs ?? {}).some((o) => o.mine && o.theirs)).map((c) => `${c.id}: part of the penalty was lost`)];
+    const body = { node: pub, network: CHAIN.network, commit: COMMIT, startedAt: new Date(STARTED).toISOString(), height, heightAgeSeconds: Math.round((Date.now() - heightAt) / 1000), stale: io.stale(), saveOk, restoredFromBak, cursor, fee: HUB_FEE, confs: CONFS, opensDeclined: declined, limits: { perPeer: MAX_PER_PEER, channels: MAX_CHANNELS, unfunded: MAX_UNFUNDED, opensPerHour: OPEN_RATE, maxDelay: MAX_DELAY }, relays: sockets(),
       reconciliation: { openChannels: CH.filter((c) => c.status === 'open').length, openValue, unspentPerNode: unspent },
-      channels: CH.map((c) => ({ id: c.id, peer: c.peer, role: c.role, status: c.status, n: c.n, ageSeconds: Math.round(Date.now() / 1000 - (c.at ?? 0)), fundedHeight: c.fundedHeight ?? null, delay: c.delay, mine: peer.myBal(c), theirs: peer.theirBal(c), htlcs: htlcRows(c), pending: c.pending ? { kind: c.pending.m.kind, n: c.pending.n, tries: c.pending.tries } : null, awaiting: !!c.awaiting, dropped: !!c.droppedIntent, signedAlts: Object.values(c.signedAlt ?? {}).reduce((a, x) => a + x.length, 0), unsent: c.unsent?.length ?? 0, forwards: c.forwards ?? null, funding: `${c.funding.txid}:${c.funding.vout}`, value: c.funding.value, conf: c.spentBy ? null : (c.conf ?? null), spentBy: c.spentBy?.txid ?? null, claims: c.claimed ? Object.fromEntries(Object.entries(c.claimed).map(([k2, v]) => [k2, v.txid])) : null, outputs: c.outputs ?? null })), warnings };
-    res.writeHead(io.stale() || !saveOk || restoredFromBak ? 503 : 200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body, null, 1)); });
+      channels: CH.map((c) => ({ id: c.id, peer: c.peer, role: c.role, status: c.status, n: c.n, ageSeconds: Math.round(Date.now() / 1000 - (c.at ?? 0)), lastMessageAgeSeconds: c.lastMsgAt ? Math.round(Date.now() / 1000 - c.lastMsgAt) : null, fundedHeight: c.fundedHeight ?? null, delay: c.delay, mine: peer.myBal(c), theirs: peer.theirBal(c), htlcs: htlcRows(c), pending: c.pending ? { kind: c.pending.m.kind, n: c.pending.n, tries: c.pending.tries } : null, awaiting: !!c.awaiting, dropped: !!c.droppedIntent, signedAlts: Object.values(c.signedAlt ?? {}).reduce((a, x) => a + x.length, 0), unsent: c.unsent?.length ?? 0, forwards: c.forwards ?? null, funding: `${c.funding.txid}:${c.funding.vout}`, value: c.funding.value, conf: c.spentBy ? null : (c.conf ?? null), spentBy: c.spentBy?.txid ?? null, claims: c.claimed ? Object.fromEntries(Object.entries(c.claimed).map(([k2, v]) => [k2, v.txid])) : null, outputs: c.outputs ?? null })), warnings };
+    res.writeHead(io.stale() || !saveOk || restoredFromBak ? 503 : 200, { 'content-type': 'application/json' }); res.end(JSON.stringify(body, null, 1)); } catch (e) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: e.message })); } });
   server.on('error', (e) => { statusError = `the status page could not listen on ${STATUS_PORT}: ${e.message}`; log('ERR', statusError); });
   server.listen(STATUS_PORT, '127.0.0.1', () => log(`status on http://127.0.0.1:${STATUS_PORT}/`)); }
