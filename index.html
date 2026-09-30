@@ -81,7 +81,8 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
   <div class="page" id="p-channels">
     <fieldset><legend>Open a channel</legend><div class="form">
       <label>To node id:</label><input id="op-peer" class="mono" placeholder="the other tab's node id (64 hex)">
-      <label>Amount:</label><div class="row"><input id="op-amt" class="mono" value="100000" style="max-width:220px"><span>sat, from this tab's on-chain coins; the other side starts with nothing and can only receive</span></div>
+      <label>Amount:</label><div class="row"><input id="op-amt" class="mono" value="100000" style="max-width:220px"><span>sat, from this tab's on-chain coins</span></div>
+      <label>Push to them:</label><div class="row"><input id="op-push" class="mono" value="0" style="max-width:220px"><span>sat of it credited to the other side at once, so a hub can pay you back through this channel</span></div>
       <label></label><div class="row"><button class="q p" id="op-go">Open channel</button><span class="tiny" id="op-out"></span></div>
     </div></fieldset>
     <div id="chlist"></div>
