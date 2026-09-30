@@ -2,7 +2,7 @@
 // settles; lib/channel.mjs builds and checks every transaction; lib/peer.mjs is the protocol, lib/route.mjs the routing;
 // this file is the host: the relays, the chain, the coins, the window. Messages are signed, not encrypted.
 const $ = (id) => document.getElementById(id);
-const NODE = 'https://cdn.jsdelivr.net/gh/bitcoin-blake/blaketestnode@f43417b6c53bda007487a8d7738a848c0e6d3792';
+const NODE = 'https://cdn.jsdelivr.net/gh/bitcoin-blake/blaketestnode@5befed46b68644185a24b00efb2aae749ffabb3d';
 const LIB = 'https://cdn.jsdelivr.net/gh/sidestr/spec@fe689e9c723f9bf43393d2dd5b6f924a701c8a18/siding/lib', CDN = 'https://cdn.jsdelivr.net/gh/bitcoin-desktop/schema@v0.0.27';
 const CHAIN = 'btc:testnet4-blake2b', KIND = 23600, BROADCAST_CHAIN = 'sidestr:tally', EXPLORER = 'https://mempool.guide/testnet4';
 const DEFAULT_RELAYS = ['wss://relay.primal.net', 'wss://nostr.oxtr.dev', 'wss://nos.lol', 'wss://nostr.mom'];
@@ -205,4 +205,4 @@ try { await init(); if (SOLE) setupPeer(); else { $('twotabs').hidden = false; l
 if (!SOLE) addEventListener('storage', (e) => { if (e.key === 'hitch:channels') { try { const fresh = JSON.parse(e.newValue ?? '[]'); CH.splice(0, CH.length, ...fresh); } catch {} } });
 document.querySelectorAll('label').forEach((l) => { if (l.htmlFor || l.querySelector('input')) return; const nx = l.nextElementSibling; const inp = nx?.matches?.('input,textarea,select') ? nx : nx?.querySelector?.('input,textarea,select'); if (inp?.id) l.htmlFor = inp.id; });
 render(); renderRelays(); renderPayments(); log('Hitch started');
-try { await tn.start(); } catch (e) { $('syncmsg').textContent = 'Error: could not start the node: ' + e.message; }
+try { if (await tn.start() === false) $('syncmsg').textContent = 'idle: the node runs in another tab of this browser (Reef, Bight, Winch or Hitch); close that tab and reload here'; } catch (e) { $('syncmsg').textContent = 'Error: could not start the node: ' + e.message; }
