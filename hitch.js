@@ -9,7 +9,7 @@ const DEFAULT_RELAYS = ['wss://relay.primal.net', 'wss://nostr.oxtr.dev', 'wss:/
 const { createTabNode, mib, n } = await import(`${NODE}/browser/tabnode.js`);
 const { makeChannels, DEFAULT_DELAY, DEFAULT_FEE, DUST } = await import('./lib/channel.mjs');
 const LS = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
-const q = new URLSearchParams(location.search);
+const q = new URLSearchParams(location.search); if (q.get('embedded') === '1') document.body.classList.add('embedded');
 const SNAP_URL = q.get('snapshot') ?? LS.get('hitch:snapshot') ?? LS.get('reef:snapshot') ?? 'https://melvin.me/public/txbt4/utxo-knots-150307.dat';
 const BLOCKS_URL = q.get('blocks') ?? LS.get('hitch:blocks') ?? LS.get('reef:blocks') ?? 'https://melvin.me/public/txbt4/txbt4-blocks';
 const OPT = (() => { const d = { relays: DEFAULT_RELAYS, delay: DEFAULT_DELAY, fee: DEFAULT_FEE }; try { return { ...d, ...JSON.parse(LS.get('hitch:options') ?? '{}') }; } catch { return d; } })();
