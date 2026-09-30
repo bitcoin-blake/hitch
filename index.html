@@ -48,10 +48,12 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
 </head>
 <body>
 <div class="win" id="win">
-  <div class="title" id="wtitle"><div class="dots"><i title="close" id="dot-close"></i><i title="minimize"></i><i class="zoom" title="zoom" id="dot-zoom"></i></div><span id="wt">Hitch — txbt4 channels · a node in this tab</span><span class="badge" id="badge" title="channels on the BLAKE2b testnet4: funded, watched and settled by the tab's own node; payments between tabs over the relays; testnet coins have no value">testnet4 · test coins</span></div>
+  <div class="rs n" data-rs="n"></div><div class="rs s" data-rs="s"></div><div class="rs e" data-rs="e"></div><div class="rs w" data-rs="w"></div><div class="rs ne" data-rs="ne"></div><div class="rs nw" data-rs="nw"></div><div class="rs se" data-rs="se"></div><div class="rs sw" data-rs="sw"></div>
+  <div class="title" id="wtitle"><div class="dots"><i title="close the window to the tray; the node keeps running" id="dot-close"></i><i title="minimize to the tray; the node keeps running" id="dot-min"></i><i class="zoom" title="zoom: fill the page, or restore" id="dot-zoom"></i></div><span id="wt">Hitch — txbt4 channels · a node in this tab</span><span class="badge" id="badge" title="channels on the BLAKE2b testnet4: funded, watched and settled by the tab's own node; payments between tabs over the relays; testnet coins have no value">testnet4 · test coins</span></div>
   <div class="menu" id="menu">
     <div data-m="file">File<div class="dd"><div id="m-nodeid">Copy my node id</div><hr><div id="m-exit">Exit</div></div></div>
     <div data-m="settings">Settings<div class="dd"><div id="m-options">Options…</div></div></div>
+    <div data-m="window">Window<div class="dd"><div id="m-zoom">Zoom</div><hr><div id="m-main">Main Window<span class="k">Ctrl+M</span></div></div></div>
     <div data-m="help">Help<div class="dd"><div id="m-readme">README</div><div id="m-source">Source on GitHub</div><hr><div id="m-about">About Hitch</div></div></div>
   </div>
   <div class="tool">
@@ -97,6 +99,7 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
   <div class="page" id="p-tx"><fieldset><legend>Activity</legend><div class="log" id="log"></div></fieldset></div>
   <div class="status"><span class="bar"><span id="syncmsg">Starting the node…</span><span class="pb" id="pb" hidden><i id="pbi" style="width:0%"></i></span><span id="synceta" class="mono"></span></span><span class="fill"></span><span class="tnbadge" title="BLAKE2b testnet4, alias txbt4">TESTNET4 · BLAKE2b</span></div>
 </div>
+<div id="tray" hidden title="Hitch is running; click to bring the window back (Ctrl+M)"><span class="mark">🔗</span><span class="tl"><b>Reef</b><span id="tray-l">…</span></span><i id="tray-dot"></i><span class="badge" id="tray-badge" hidden></span></div>
 <div id="toasts"></div>
 <dialog id="about"><div class="t">About Hitch</div><div class="b"><div></div><div>
 <p><b>Hitch 0.1</b> · payment channels in a browser tab, for txbt4, the BLAKE2b testnet4.</p>

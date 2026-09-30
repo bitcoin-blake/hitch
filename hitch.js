@@ -19,7 +19,7 @@ const fmt = (t) => new Date(t * 1000).toLocaleString(undefined, { month: '2-digi
 
 // ---- log and notices
 const LOG = []; function log(text, cls = '') { LOG.push([now(), text, cls]); if (LOG.length > 500) LOG.shift(); const line = (l) => `<div class="${l[2]}">${fmt(l[0])} ${l[1].replace(/</g, '&lt;')}</div>`; $('log').innerHTML = LOG.slice().reverse().map(line).join(''); $('recent').innerHTML = LOG.slice(-8).reverse().map(line).join('') || 'nothing yet'; }
-function notify(title, body) { log(`${title}: ${body}`, 'b'); const el = document.createElement('div'); el.className = 'toast'; el.innerHTML = `<b>${title}</b><br>${body}`; $('toasts').appendChild(el); setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 400); }, 7000); if ('Notification' in window && Notification.permission === 'granted') new Notification(`Hitch · ${title}`, { body }); }
+let notify = function (title, body) { log(`${title}: ${body}`, 'b'); const el = document.createElement('div'); el.className = 'toast'; el.innerHTML = `<b>${title}</b><br>${body}`; $('toasts').appendChild(el); setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 400); }, 7000); if ('Notification' in window && Notification.permission === 'granted') new Notification(`Hitch · ${title}`, { body }); }
 
 // ---- the node in the tab
 const tn = createTabNode({ base: NODE, snapshotUrl: SNAP_URL, blocksUrl: BLOCKS_URL }); const node = tn.node;
@@ -163,7 +163,35 @@ $('pay-paste').onclick = async () => { try { $('pay-inv').value = await navigato
 $('inv-go').onclick = () => { const s = makeInvoice(Math.round(Number($('inv-amt').value)), $('inv-memo').value.trim()); $('inv-out').value = s; try { const qr = qrcode(0, 'M'); qr.addData(s); qr.make(); $('inv-qr').innerHTML = qr.createSvgTag({ cellSize: 3, margin: 0 }); } catch {} };
 $('inv-copy').onclick = async () => { try { await navigator.clipboard.writeText($('inv-out').value); $('inv-copy').textContent = 'Copied'; setTimeout(() => { $('inv-copy').textContent = 'Copy'; }, 1500); } catch {} };
 $('m-nodeid').onclick = async () => { try { await navigator.clipboard.writeText(W.pub); notify('Copied', 'this node id is on the clipboard'); } catch {} };
-$('m-exit').onclick = () => { $('win').style.display = 'none'; }; $('dot-close').onclick = () => { $('win').style.display = 'none'; };
+// ---- the window: dragged by its title bar, resized at any edge, zoomed by the green dot; geometry remembered; the tray when closed or minimized
+const win = $('win'); const embedded = q.get('embedded') === '1' || q.get('frame') === '0';
+const geom = { get: () => { try { return JSON.parse(LS.get('hitch:geometry') ?? 'null'); } catch { return null; } }, set: (g) => LS.set('hitch:geometry', JSON.stringify(g)) };
+function applyGeometry(g) { win.style.left = g.x + 'px'; win.style.top = g.y + 'px'; win.style.width = g.w + 'px'; win.style.height = g.h + 'px'; }
+function clampGeometry(g) { const W = innerWidth, H = innerHeight; g.w = Math.max(720, Math.min(g.w, W)); g.h = Math.max(420, Math.min(g.h, H)); g.x = Math.max(0, Math.min(g.x, W - Math.min(g.w, 120))); g.y = Math.max(0, Math.min(g.y, H - 40)); return g; }
+function defaultGeometry() { const w = Math.min(1180, innerWidth - 48), h = Math.min(780, innerHeight - 48); return { x: Math.round((innerWidth - w) / 2), y: Math.round((innerHeight - h) / 2), w, h }; }
+function layoutWindow() { if (embedded) return; const small = innerWidth < 1100 || innerHeight < 700; const saved = geom.get(); const max = saved?.max ?? small; win.classList.toggle('max', max); if (!max) applyGeometry(clampGeometry(saved?.g ?? defaultGeometry())); }
+function saveGeometry() { if (embedded) return; const max = win.classList.contains('max'); const g = max ? (geom.get()?.g ?? defaultGeometry()) : { x: win.offsetLeft, y: win.offsetTop, w: win.offsetWidth, h: win.offsetHeight }; geom.set({ max, g }); }
+function toggleZoom() { if (embedded) return; const max = !win.classList.contains('max'); win.classList.toggle('max', max); if (!max) applyGeometry(clampGeometry(geom.get()?.g ?? defaultGeometry())); saveGeometry(); }
+if (!embedded) {
+  layoutWindow(); addEventListener('resize', () => { if (!win.classList.contains('max')) applyGeometry(clampGeometry({ x: win.offsetLeft, y: win.offsetTop, w: win.offsetWidth, h: win.offsetHeight })); });
+  $('dot-zoom').onclick = (e) => { e.stopPropagation(); toggleZoom(); }; $('wtitle').ondblclick = (e) => { if (!e.target.closest('.dots, .badge')) toggleZoom(); }; $('dot-close').onclick = (e) => { e.stopPropagation(); hideWindow(); }; $('dot-min').onclick = (e) => { e.stopPropagation(); hideWindow(); };
+  // drag by the title bar
+  $('wtitle').onpointerdown = (e) => { if (win.classList.contains('max') || e.target.closest('.dots, .badge')) return; const sx = e.clientX - win.offsetLeft, sy = e.clientY - win.offsetTop; const move = (ev) => applyGeometry(clampGeometry({ x: ev.clientX - sx, y: ev.clientY - sy, w: win.offsetWidth, h: win.offsetHeight })); const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); saveGeometry(); }; addEventListener('pointermove', move); addEventListener('pointerup', up); e.preventDefault(); };
+  // resize at any edge or corner
+  win.querySelectorAll(':scope > .rs').forEach((h) => { h.onpointerdown = (e) => { if (win.classList.contains('max')) return; const d = h.dataset.rs, x0 = e.clientX, y0 = e.clientY, g0 = { x: win.offsetLeft, y: win.offsetTop, w: win.offsetWidth, h: win.offsetHeight };
+    const move = (ev) => { const dx = ev.clientX - x0, dy = ev.clientY - y0; const g = { ...g0 }; if (d.includes('e')) g.w = g0.w + dx; if (d.includes('s')) g.h = g0.h + dy; if (d.includes('w')) { g.w = g0.w - dx; g.x = g0.x + dx; } if (d.includes('n')) { g.h = g0.h - dy; g.y = g0.y + dy; } if (g.w < 720) { if (d.includes('w')) g.x = g0.x + g0.w - 720; g.w = 720; } if (g.h < 420) { if (d.includes('n')) g.y = g0.y + g0.h - 420; g.h = 420; } applyGeometry(g); };
+    const up = () => { removeEventListener('pointermove', move); removeEventListener('pointerup', up); saveGeometry(); }; addEventListener('pointermove', move); addEventListener('pointerup', up); e.preventDefault(); e.stopPropagation(); }; });
+}
+
+// ---- the tray: closing or minimizing the window keeps the node running and leaves a small card to come back through (Knots goes to the system tray the same way); inside Glass the host is told and keeps its dock
+let unseen = 0;
+function hideWindow() { if (embedded) { try { parent.postMessage({ source: 'hitch', type: 'minimize' }, '*'); } catch {} return; } win.style.display = 'none'; unseen = 0; $('tray-badge').hidden = true; $('tray').hidden = false; trayRefresh(); }
+function showWindow() { win.style.display = ''; $('tray').hidden = true; unseen = 0; $('tray-badge').hidden = true; }
+function trayRefresh() { if ($('tray').hidden) return; const open = CH.filter((c) => c.status === 'open'); const sd = open.length ? ` · ${open.length} channel${open.length === 1 ? '' : 's'}, ${sats(open.reduce((a, c) => a + myBal(c), 0))}` : ''; $('tray-l').textContent = node.error ? 'error' : node.synced ? `up to date · ${n(node.height)}${sd}` : node.phase === 'fetch' ? 'fetching the snapshot' : node.phase === 'hash' ? 'checking the snapshot' : node.phase === 'verify' ? 'verifying the snapshot' : node.phase === 'sync' ? `syncing · ${n(node.height ?? 0)}` : 'starting'; $('tray-dot').className = node.error ? 'bad' : node.synced ? 'ok' : 'sync'; }
+$('tray').onclick = () => showWindow(); setInterval(trayRefresh, 1000);
+
+$('m-exit').onclick = () => hideWindow(); $('m-zoom').onclick = () => toggleZoom(); $('m-main').onclick = () => showWindow(); document.addEventListener('keydown', (e) => { if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); showWindow(); } });
+const _notify = notify; notify = (title, body) => { _notify(title, body); if (!$('tray').hidden) { unseen++; $('tray-badge').textContent = unseen; $('tray-badge').hidden = false; } };
 $('m-readme').onclick = () => window.open('https://github.com/bitcoin-blake/hitch#readme', '_blank', 'noopener'); $('m-source').onclick = () => window.open('https://github.com/bitcoin-blake/hitch', '_blank', 'noopener');
 $('m-about').onclick = () => $('about').showModal(); $('about-ok').onclick = () => $('about').close();
 $('m-options').onclick = () => { $('o-relays').value = OPT.relays.join('\n'); $('o-delay').value = OPT.delay; $('o-fee').value = OPT.fee; $('o-snapshot').value = SNAP_URL; $('o-blocks').value = BLOCKS_URL; $('options').showModal(); }; $('o-cancel').onclick = () => $('options').close();
