@@ -30,6 +30,7 @@ relay.subscribe({ relays: RELAYS, chainId: CHAIN.network, kind: KIND, verify: ve
 async function watch() { try { height = await rpc('getblockcount'); } catch (e) { return log('ERR rpc:', e.message); }
   for (const ch of CH) { if (['closed', 'proposed', 'accepted', 'punished', 'closed-theirs-old', 'spent-unknown'].includes(ch.status)) continue;
     try { const out = await rpc('gettxout', ch.funding.txid, ch.funding.vout, true);
+      if (out && out.confirmations === 0) continue; // in the mempool: not open yet
       if (out) { if (ch.status === 'funding') { ch.status = 'open'; ch.fundedHeight = height - out.confirmations + 1; io.save(); log(`channel ${ch.id} open: ${ch.funding.value} sat at block ${ch.fundedHeight}`); } else if (!ch.fundedHeight) { ch.fundedHeight = height - out.confirmations + 1; io.save(); } ch.conf = out.confirmations; continue; }
       if (!ch.fundedHeight) continue; if (ch.spentBy) { if (['closed-mine', 'closed-theirs'].includes(ch.status)) await peer.afterClose(ch); continue; }
       for (let h = ch.fundedHeight; h <= height; h++) { const b = await rpc('getblock', await rpc('getblockhash', h), 2); const tx = b.tx.find((t) => t.vin.some((i) => i.txid === ch.funding.txid && i.vout === ch.funding.vout)); if (tx) { await peer.onSpend(ch, { txid: tx.txid, height: h, hex: tx.hex }); break; } }
