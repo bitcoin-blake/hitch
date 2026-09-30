@@ -30,6 +30,12 @@ Two tabs on one machine, each its own node, over the live txbt4 chain with block
 | cheat | 152,083 | on a second channel A paid 30,000 then published its revoked state 0 |
 | penalty | 152,084 | B's tab found the old commitment in its own chain within 40 s, spent its to_local with the revealed secret: 99,400 sat to B, accepted by the Knots node |
 
+## Through a hub
+
+HTLCs are in since the second night: a hash-locked output in each commitment with three leaves (the receiver with the preimage, the offerer after the expiry, the revocation key), the commitment's owner waiting the delay on its own claims so a revoked commitment's HTLCs can still be punished. An invoice carries the payment hash and the node ids of the issuer's hubs; paying it is an HTLC on a channel to the issuer, or to one of its hubs with the route, and the issuer settles with the preimage. `bin/hub.mjs` runs the same protocol in Node over the local node's RPC: it accepts channels (open one to it with a push if you want it to pay you back), forwards HTLCs for a fee and carries settles and fails back. The protocol is `lib/peer.mjs` and `lib/route.mjs`, pure; `test/peer-test.mjs` runs A, a hub and B in memory.
+
+First routed payment, 30 September 2026, on the live chain: A opened 100,000 sat to the estate's hub, B opened 100,000 with 50,000 pushed to the hub (block 152,086); B issued a 20,000 sat invoice naming the hub; A's HTLC of 20,010 crossed the hub as an HTLC of 20,000 to B, B settled with the preimage, the hub settled upstream; 25 seconds end to end, nothing on the chain.
+
 ## Name
 
 A hitch ties a line to something. Reef the knot, Bight the slack, Winch the pull, Hitch the tie.
