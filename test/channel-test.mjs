@@ -59,4 +59,30 @@ t('to_remote is a plain key-path coin of the other key', C.verifyTx(rem, [{ valu
 const close = C.closingTx(ch, s1); close.witness = [C.fundingWitness(ch, { [a]: C.signFunding(ch, close, keyA), [b]: C.signFunding(ch, close, keyB) })];
 t('a cooperative close pays both balances straight to their keys and verifies', C.verifyTx(close, [C.fundingPrevout(ch)]).ok === true && close.outputs.length === 2 && close.outputs[0].value + close.outputs[1].value === 100000 - 300);
 t('a commitment and a close encode and decode through the codec', C.txid(C.decode(C.encode(cA1.tx))) === cA1id && C.decode(C.encode(close)).witness[0].length === 4);
+// HTLCs: A offers 20,000 to B, locked to sha256(preimage), expiring at a block height
+const preimage = signer.randomKey(); const HH = hash.bytesToHex(hash.sha256(hash.hexToBytes(preimage))); const expiry = 152200;
+const revA2 = rev(signer.randomKey()), revB2 = rev(signer.randomKey());
+const s2 = { balA: 40000, balB: 40000, rev: { a: revA2.pub, b: revB2.pub }, htlcs: [{ id: 1, from: 'a', amount: 20000, hash: HH, expiry }] };
+const hA = C.commitmentTx(ch, 2, { ...s2, owner: 'a' }), hB = C.commitmentTx(ch, 2, { ...s2, owner: 'b' });
+t('with an HTLC in flight both commitments carry a third output of its amount', hA.kinds.join() === 'to_local,to_remote,htlc' && hB.kinds.join() === 'to_local,to_remote,htlc' && hA.tx.outputs[2].value === 20000 && hA.htlcs[0].offeredByOwner === true && hB.htlcs[0].offeredByOwner === false);
+for (const c of [hA, hB]) c.tx.witness = [C.fundingWitness(ch, { [a]: C.signFunding(ch, c.tx, keyA), [b]: C.signFunding(ch, c.tx, keyB) })];
+t('both HTLC-bearing commitments verify', C.verifyTx(hA.tx, [C.fundingPrevout(ch)]).ok && C.verifyTx(hB.tx, [C.fundingPrevout(ch)]).ok);
+const hAid = C.txid(hA.tx), hBid = C.txid(hB.tx); const hPrevA = [{ value: 20000, scriptPubKey: hA.htlcs[0].scripts.spk }], hPrevB = [{ value: 20000, scriptPubKey: hB.htlcs[0].scripts.spk }];
+// on A's commitment (A offered): B claims at once with the preimage; A refunds after the expiry and the delay
+const okB = C.htlcClaim({ commit: hA, htlc: hA.htlcs[0], kind: 'success', txid: hAid, value: 20000, to: '5120' + b, fee: 200, key: keyB, preimage });
+t('the receiver claims an offered HTLC with the preimage at once', C.verifyTx(okB, hPrevA).ok === true && okB.inputs[0].sequence === 0xfffffffe);
+const badPre = C.htlcClaim({ commit: hA, htlc: hA.htlcs[0], kind: 'success', txid: hAid, value: 20000, to: '5120' + b, fee: 200, key: keyB, preimage: signer.randomKey() });
+t('a wrong preimage fails', C.verifyTx(badPre, hPrevA).ok === false);
+const toA = C.htlcClaim({ commit: hA, htlc: hA.htlcs[0], kind: 'timeout', txid: hAid, value: 20000, to: '5120' + a, fee: 200, key: keyA });
+t('the offerer takes it back after the expiry, waiting the delay on its own commitment', C.verifyTx(toA, hPrevA).ok === true && toA.lockTime === expiry && toA.inputs[0].sequence === ch.delay);
+const tooSoon = { ...toA, lockTime: expiry - 1 }; tooSoon.witness = [[C.signLeaf(tooSoon, 0, hPrevA, hA.htlcs[0].scripts.timeout.leaf, keyA), hA.htlcs[0].scripts.timeout.script, hA.htlcs[0].scripts.timeout.control]];
+t('before the expiry the timeout leaf refuses (CHECKLOCKTIMEVERIFY)', C.verifyTx(tooSoon, hPrevA).ok === false);
+// on B's commitment (B received): B waits the delay to claim with the preimage; A refunds at once after the expiry
+const okB2 = C.htlcClaim({ commit: hB, htlc: hB.htlcs[0], kind: 'success', txid: hBid, value: 20000, to: '5120' + b, fee: 200, key: keyB, preimage });
+t('on its own commitment the receiver claims with the preimage after the delay', C.verifyTx(okB2, hPrevB).ok === true && okB2.inputs[0].sequence === ch.delay);
+const toA2 = C.htlcClaim({ commit: hB, htlc: hB.htlcs[0], kind: 'timeout', txid: hBid, value: 20000, to: '5120' + a, fee: 200, key: keyA });
+t('the offerer refunds from the other commitment at once after the expiry', C.verifyTx(toA2, hPrevB).ok === true && toA2.inputs[0].sequence === 0xfffffffe);
+const punish = C.htlcClaim({ commit: hA, htlc: hA.htlcs[0], kind: 'revocation', txid: hAid, value: 20000, to: '5120' + b, fee: 200, key: revA2.key });
+t('a revoked commitment\'s HTLC output falls to the revocation secret', C.verifyTx(punish, hPrevA).ok === true);
+let threw = false; try { C.closingTx(ch, s2); } catch { threw = true; } t('a cooperative close refuses while an HTLC is in flight', threw);
 console.log(`\n${ok} passed, ${bad} failed`); process.exit(bad ? 1 : 0);
