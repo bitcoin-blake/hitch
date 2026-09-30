@@ -7,13 +7,14 @@ const SCHEMA = H(process.env.SCHEMA ?? '~/bitcoin-desktop/schema'), BTN = H(proc
 const [{ loadEngine }, hash, secp, { makeSigner }, { makeChannels }, { makePeer }, { makeRouter }] = await Promise.all([import(`${BTN}/lib/engine.mjs`), import(`${SCHEMA}/codec/hash.js`), import(`${SCHEMA}/codec/secp256k1.js`), import(`${LIB}/schnorr.mjs`), import('../lib/channel.mjs'), import('../lib/peer.mjs'), import('../lib/route.mjs')]);
 const k = await loadEngine('btc:testnet4-blake2b'); const signer = makeSigner({ hash, secp }); const C = makeChannels({ k, hash, secp, signer });
 let ok = 0, bad = 0; const t = (name, cond) => { console.log(`  ${cond ? 'PASS' : 'FAIL'}  ${name}`); cond ? ok++ : bad++; };
-const chain = { height: 152100, broadcasts: [] }; const inbox = []; const peers = {};
-function host(name, { hub = false } = {}) { const key = signer.randomKey(), pub = signer.pubkeyOf(key); const channels = []; const invoices = new Map(); let n = 0;
-  const io = { myScript: '5120' + pub, height: () => chain.height, save: () => {}, invoiceFor: (h) => invoices.get(h) ?? null, log: (s, c) => { if (process.env.VERBOSE || c === 'e') console.log(`    [${name}] ${s}`); }, notify: () => {},
+const chain = { height: 152100, broadcasts: [], spent: new Map(), mine() { for (const b of this.broadcasts) { let tx; try { tx = C.decode(b.hex); } catch { continue; } for (const i of tx.inputs) this.spent.set(`${i.prevout.txid}:${i.prevout.vout}`, { txid: C.txid(tx), height: this.height, hex: b.hex }); } } }; const inbox = []; const peers = {}; let seq = 0;
+const settle = async () => { for (let i = 0; i < 12; i++) { await pump(); await new Promise((r) => setTimeout(r, 40)); } };
+function host(name, { hub = false } = {}) { const key = hash.bytesToHex(hash.sha256(new TextEncoder().encode('hitch-test-' + name))), pub = signer.pubkeyOf(key); const channels = []; const invoices = new Map(); const notes = [];
+  const io = { myScript: '5120' + pub, height: () => chain.height, save: () => (io.saveFails ? false : true), findSpend: async (ch, { txid, vout }) => chain.spent.get(`${txid}:${vout}`) ?? null, invoiceFor: (h) => invoices.get(h) ?? null, log: (s, c) => { if (process.env.VERBOSE || c === 'e') console.log(`    [${name}] ${s}`); }, notify: (t, b) => { notes.push(`${t}: ${b}`); },
     send: async (ch, body) => { inbox.push({ to: ch.peer, from: pub, body }); }, broadcast: async (hex, what) => { chain.broadcasts.push({ from: name, hex, what }); return 1; },
-    buildFunding: async (amount, spk) => { const txid = hash.bytesToHex(hash.sha256(new TextEncoder().encode(name + (++n) + Math.random()))); return { txid, vout: 0, hex: '00' }; } };
-  const peer = makePeer({ C, signer, hash, pub, key, channels, io, opts: { delay: 6, fee: 300, hubFee: 10, pendingTimeout: 0 } }); const router = makeRouter({ peer, io, invoices, hub }); io.onUpdate = router.onUpdate;
-  return peers[pub] = { name, pub, key, peer, invoices, channels, io }; }
+    buildFunding: async (amount, spk) => { const txid = hash.bytesToHex(hash.sha256(new TextEncoder().encode(name + (++seq)))); return { txid, vout: 0, hex: '00' }; } };
+  const peer = makePeer({ C, signer, hash, pub, key, channels, io, opts: { delay: 6, fee: 300, hubFee: 10, pendingTimeout: 0 } }); const router = makeRouter({ peer, io, invoices, hub, retryMs: 30 }); const bg = (f) => (...a) => { f(...a).catch((e) => io.log(`router: ${e.message}`, 'e')); }; io.onUpdate = bg(router.onUpdate); io.onDropped = bg(router.onDropped); io.onPreimage = bg(router.onPreimage);
+  return peers[pub] = { name, pub, key, peer, invoices, channels, io, notes }; }
 async function pump() { let guard = 0; while (inbox.length && guard++ < 200) { const m = inbox.shift(); await peers[m.to].peer.onMessage(m.from, m.body); } }
 const A = host('A'), HUB = host('hub', { hub: true }), B = host('B');
 const confirm = (id) => { for (const p of Object.values(peers)) for (const c of p.channels) if (c.id === id && c.status === 'funding') { c.status = 'open'; c.fundedHeight = chain.height; } };
@@ -28,13 +29,13 @@ await A.peer.pay(chA, 1000, 'hello'); await pump(); const hubA = HUB.channels.fi
 t('a direct payment moves the balance on both sides and revokes state 0 both ways', chA.n === 1 && hubA.n === 1 && chA.states[1].balA === 99000 && hubA.states[1].balB === 1000 && chA.theirRev[0] && hubA.theirRev[0]);
 // B issues an invoice routed via the hub; A pays it with an HTLC
 const { preimage, inv } = B.peer.invoice(20000, 'coffee', [HUB.pub]); B.invoices.set(inv.h, { preimage, amount: 20000 });
-await A.peer.addHtlc(chA, { amount: inv.a + inv.f, hash: inv.h, expiry: chain.height + 40, route: { to: inv.p }, memo: inv.m }); await pump(); await new Promise((r) => setTimeout(r, 1700)); await pump(); await new Promise((r) => setTimeout(r, 1700)); await pump();
+await A.peer.addHtlc(chA, { amount: inv.a + inv.f, hash: inv.h, expiry: chain.height + 40, route: { to: inv.p }, memo: inv.m }); await pump(); await settle();
 const hubB = HUB.channels.find((c) => c.id === chB.id);
 t('the HTLC crossed the hub, B settled it with the preimage, the hub settled upstream: B gained 20,000, the hub kept its fee', chB.states[chB.n].balA === 50000 + 20000 && hubB.states[hubB.n].balB === 50000 - 20000 && chA.states[chA.n].balA === 99000 - 20010 && hubA.states[hubA.n].balB === 1000 + 20010 && (chA.states[chA.n].htlcs ?? []).length === 0 && (chB.states[chB.n].htlcs ?? []).length === 0);
 t('every commitment along the way still verifies', [A, B, HUB].every((p) => p.channels.every((c) => { const my = p.peer.myCommitAt(c, c.n); my.tx.witness = [C.fundingWitness(c, { [p.pub]: C.signFunding(c, my.tx, p.key), [c.peer]: c.sigs[c.n] })]; return C.verifyTx(my.tx, [C.fundingPrevout(c)]).ok === true; })));
 // an invoice for a node the hub has no channel to fails back, and A's balance returns
 const stranger = signer.pubkeyOf(signer.randomKey()); const before = chA.states[chA.n].balA;
-await A.peer.addHtlc(chA, { amount: 5000, hash: B.peer.sha(signer.randomKey()), expiry: chain.height + 40, route: { to: stranger } }); await pump(); await new Promise((r) => setTimeout(r, 1700)); await pump();
+await A.peer.addHtlc(chA, { amount: 5000, hash: B.peer.sha(signer.randomKey()), expiry: chain.height + 40, route: { to: stranger } }); await pump(); await settle();
 t('an HTLC with no route is failed by the hub and the amount returns to A', chA.states[chA.n].balA === before && (chA.states[chA.n].htlcs ?? []).length === 0);
 // cooperative close of B's channel
 await B.peer.closeChannel(chB); await pump();
@@ -48,7 +49,7 @@ t('a revoked commitment from the hub is punished: the penalty spends its to_loca
 const chA2 = await A.peer.openChannel(HUB.pub, 50000); await pump(); confirm(chA2.id); await A.peer.pay(chA2, 2000); await pump();
 await A.peer.forceClose(chA2); const fc = chain.broadcasts.at(-1); const fcTx = C.decode(fc.hex); t('a forced close publishes my latest commitment, valid under the interpreter', C.verifyTx(fcTx, [C.fundingPrevout(chA2)]).ok === true && chA2.status === 'force-closing');
 await A.peer.onSpend(chA2, { txid: C.txid(fcTx), height: chain.height, hex: fc.hex }); const n1 = chain.broadcasts.length; chain.height += 6; await A.peer.afterClose(chA2);
-t('after the delay the to_local is swept to my key and the channel is closed', chain.broadcasts.length === n1 + 1 && chA2.status === 'closed' && (() => { const c = A.peer.myCommitAt(chA2, chA2.n); const sw = C.decode(chain.broadcasts.at(-1).hex); return C.verifyTx(sw, [{ value: c.tx.outputs[0].value, scriptPubKey: c.toLocal.spk }]).ok === true; })());
+t('after the delay the to_local is swept to my key; the channel is settling until the sweep confirms', chain.broadcasts.length === n1 + 1 && chA2.status === 'settling' && (() => { chain.mine(); return true; })() && (() => { const c = A.peer.myCommitAt(chA2, chA2.n); const sw = C.decode(chain.broadcasts.at(-1).hex); return C.verifyTx(sw, [{ value: c.tx.outputs[0].value, scriptPubKey: c.toLocal.spk }]).ok === true; })());
 // ---- resync: lost messages and a collision, on a fresh channel between A and the hub
 const chR = await A.peer.openChannel(HUB.pub, 60000, 20000); await pump(); confirm(chR.id); const hubR = HUB.channels.find((c) => c.id === chR.id);
 const drop = (t) => { const i = inbox.findIndex((m) => m.body.t === t); if (i >= 0) inbox.splice(i, 1); };
@@ -70,8 +71,9 @@ await A.peer.resyncAll(true); await pump(); t('a resync carries the secret; the 
 await A.peer.pay(chR, 100); await HUB.peer.pay(hubR, 200); await pump(); const lower = A.pub < HUB.pub ? 'A' : 'hub';
 t(`both proposed at once: ${lower}'s update stood and the other side dropped its own`, chR.n === 5 && hubR.n === 5 && chR.states[5].balA === hubR.states[5].balA && (lower === 'A' ? chR.states[5].balA === chR.states[4].balA - 100 : chR.states[5].balA === chR.states[4].balA + 200) && !chR.pending && !hubR.pending);
 const loser = lower === 'A' ? HUB : A; const loserCh = lower === 'A' ? hubR : chR;
-t('the loser\'s signed state is remembered as an alternative the winner might publish, and is not retried by itself', (loserCh.signedAlt?.[5] ?? []).length === 1 && !!loserCh.droppedIntent);
+t('the loser\'s signed state is remembered as an alternative the winner might publish, and the loser is told at once that its payment was not made', (loserCh.signedAlt?.[5] ?? []).length === 1 && !loserCh.droppedIntent && loser.notes.some((x) => /Payment not made/.test(x)));
 await A.peer.tick(); await HUB.peer.tick(); await pump();
-t('the tick reports the set-aside update and clears it; the states stay at 5', chR.n === 5 && hubR.n === 5 && !loserCh.droppedIntent);
+t('a tick changes nothing: the states stay at 5 with nothing pending', chR.n === 5 && hubR.n === 5 && !chR.pending && !hubR.pending);
+{ await A.peer.afterClose(chA2); t('once the sweep is in a block the channel is closed', chA2.status === 'closed'); }
 t('every commitment still verifies after the resyncs', [A, HUB].every((p) => p.channels.filter((c) => c.id === chR.id).every((c) => { const my = p.peer.myCommitAt(c, c.n); my.tx.witness = [C.fundingWitness(c, { [p.pub]: C.signFunding(c, my.tx, p.key), [c.peer]: c.sigs[c.n] })]; return C.verifyTx(my.tx, [C.fundingPrevout(c)]).ok === true; })));
 console.log(`\n${ok} passed, ${bad} failed`); process.exit(bad ? 1 : 0);

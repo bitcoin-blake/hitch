@@ -90,4 +90,23 @@ let threw = false; try { C.closingTx(ch, s2); } catch { threw = true; } t('a coo
   const vec = { internal: C.internal, funding: g.spk, fundingLeaf: g.script, toLocal: tl.spk, delayed: tl.delayed.script, htlc: hs.spk, success: hs.success.script, timeout: hs.timeout.script };
   const want = { internal: '257ea3139d352eb3705808452e5268c6b932af03a03e09bfe9017bb8be3b3ece', funding: '51201c17bc9ec453913ba2e233ea77bab2fb84e8091fd232568b3eef046717dbed72', fundingLeaf: '20466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27ac204f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaba529c', toLocal: '5120cc7c54c2ace9c757d114cc18cb05b3865580ced8004519f72dbb104fdbc7bbc1', delayed: '56b275204f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac', htlc: '5120cf2924765a12e11e9fed368d5251a591d40159e95c9d4da98066232542956a20', success: 'a820abababababababababababababababababababababababababababababababab8820466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27ac', timeout: '03885202b17556b275204f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aaac' };
   if (process.env.PRINT_VECTORS) console.log(JSON.stringify(vec, null, 1)); for (const [k2, v] of Object.entries(want)) t(`golden vector: ${k2}`, vec[k2] === v); }
+// ---- the two-party revocation key: neither side alone can use the leaf; the counterparty can once the per-state secret is revealed
+{ const r = '33'.repeat(32), sI = '44'.repeat(32); const R = signer.pubkeyOf(r), S = signer.pubkeyOf(sI);
+  const P1 = C.revocationPub(R, sI), P2 = C.revocationPub(S, r);
+  t('both sides compute the same revocation key from what they hold (R + s·G = S + r·G)', P1 === P2);
+  const tl = C.toLocalScript(a, P1, 6); const commit = { toLocal: tl, delay: 6 }; const prev = [{ value: 50000, scriptPubKey: tl.spk }];
+  const both = C.sweepTx({ commit, txid: cA1id, vout: 0, value: 50000, to: dest, fee: 200, delayed: 0, key: C.revocationKey(r, sI) });
+  t('with both secrets the revocation leaf spends', C.verifyTx(both, prev).ok === true);
+  for (const [name, key] of [['the owner\'s per-state secret alone', sI], ['the counterparty\'s basepoint secret alone', r], ['the owner\'s channel key', keyA]]) { const one = C.sweepTx({ commit, txid: cA1id, vout: 0, value: 50000, to: dest, fee: 200, delayed: 0, key }); t(`${name} cannot use the revocation leaf`, C.verifyTx(one, prev).ok === false); }
+  const hs = C.htlcScript({ ownerPub: a, remotePub: b, revPub: P1, delay: 6, hash: HH, expiry, offeredByOwner: false }); const hPrev = [{ value: 20000, scriptPubKey: hs.spk }]; const htlc = { vout: 0, scripts: hs, expiry };
+  t('an HTLC output\'s revocation leaf needs both secrets too', C.verifyTx(C.htlcClaim({ commit, htlc, kind: 'revocation', txid: cA1id, value: 20000, to: dest, fee: 200, key: C.revocationKey(r, sI) }), hPrev).ok === true && C.verifyTx(C.htlcClaim({ commit, htlc, kind: 'revocation', txid: cA1id, value: 20000, to: dest, fee: 200, key: sI }), hPrev).ok === false);
+  t('golden vector: the two-party revocation key for fixed secrets', P1 === '4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa');
+  // fixed keys, fixed funding, fixed revocation points: these transaction ids must never change, or funded channels are stranded
+  const ka = '11'.repeat(32), kb = '22'.repeat(32); const pa = signer.pubkeyOf(ka), pb = signer.pubkeyOf(kb); const g = C.fundingScript(pa, pb);
+  const fx = { keys: { a: pa, b: pb }, funding: { txid: 'ab'.repeat(32), vout: 1, value: 100000, ...g }, fee: 300, delay: 6 }; const rv = { a: P1, b: C.revocationPub(S, r) };
+  t('golden vector: the funder\'s commitment txid', C.txid(C.commitmentTx(fx, 1, { balA: 60000, balB: 40000, rev: rv, owner: 'a' }).tx) === '138fe22589d87f2f363907ad877a25f73d20d5415f233c7dcc0dbd9ac2f03c13');
+  t('golden vector: the other side\'s commitment txid', C.txid(C.commitmentTx(fx, 1, { balA: 60000, balB: 40000, rev: rv, owner: 'b' }).tx) === '56ae7f0fb0b450356387a552da8a952eae772286320e2a94f36ee7c07ce05152');
+  t('golden vector: a commitment with an HTLC', C.txid(C.commitmentTx(fx, 2, { balA: 40000, balB: 40000, rev: rv, htlcs: [{ id: 1, from: 'a', amount: 20000, hash: 'ab'.repeat(32), expiry: 152200 }], owner: 'a' }).tx) === '4cd9bf1f440e682fcfae5d1bb0e0dd11ff9ce71d738d9ad60e8b6f3e4fe30110');
+  t('golden vector: the cooperative close', C.txid(C.closingTx(fx, { balA: 60000, balB: 40000 })) === '5a31ac748e2e364b1c11f21b32b85d8e539dbf9baa9f4a8c41c596a41065d1b7');
+  t('the preimage is read back from a success claim\'s witness', C.preimageIn(okB, HH) === preimage && C.preimageIn(toA, HH) === null); }
 console.log(`\n${ok} passed, ${bad} failed`); process.exit(bad ? 1 : 0);

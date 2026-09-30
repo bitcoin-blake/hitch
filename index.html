@@ -70,6 +70,8 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
       <fieldset><legend>Balances</legend><div class="kv">
         <span class="l">In channels (spendable):</span><span class="v big" id="ch-local">…</span>
         <span class="l">In channels (theirs):</span><span class="v dim" id="ch-remote">…</span>
+        <span class="l">In flight (HTLCs out):</span><span class="v dim" id="ch-flight">…</span>
+        <span class="l">Settling on chain:</span><span class="v dim" id="ch-settling">…</span>
         <span class="l">On chain (available):</span><span class="v dim" id="avail">…</span>
         <span class="l">On chain (immature):</span><span class="v dim" id="immature">…</span>
         <span class="sep"></span>
@@ -86,7 +88,8 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
       <label>Push to them:</label><div class="row"><input id="op-push" class="mono" value="0" style="max-width:220px"><span>sat of it credited to the other side at once, so a hub can pay you back through this channel</span></div>
       <label></label><div class="row"><button class="q p" id="op-go">Open channel</button><span class="tiny" id="op-out"></span></div>
     </div></fieldset>
-    <div class="notice" id="keepopen" hidden>Keep this tab open: a payment is settling, an HTLC is in flight, or a close is being watched. A closed tab cannot punish a cheat or claim what is yours; the delay is measured in blocks of about twenty minutes.</div>
+    <div class="notice" id="nokey" hidden role="alert">This browser did not keep the key (a private window, storage blocked, or full). A channel funded now would be lost on reload. Fix the storage and reload before opening or receiving anything.</div>
+    <div class="notice" id="keepopen" hidden role="status">Keep this tab open: a payment is settling, an HTLC is in flight, or a close is being watched. A closed tab cannot punish a cheat or claim what is yours; the delay is measured in blocks of about twenty minutes.</div>
     <div id="chlist"></div>
   </div>
   <div class="page" id="p-send">
@@ -103,7 +106,7 @@ canvas.tr { width:100%; height:260px; background:#fff; border:1px solid var(--li
   <div class="status"><span class="bar"><span id="syncmsg">Starting the node…</span><span class="pb" id="pb" hidden><i id="pbi" style="width:0%"></i></span><span id="synceta" class="mono"></span></span><span class="fill"></span><span class="tnbadge" title="BLAKE2b testnet4, alias txbt4">TESTNET4 · BLAKE2b</span></div>
 </div>
 <div id="tray" hidden title="Hitch is running; click to bring the window back (Ctrl+M)"><span class="mark">🔗</span><span class="tl"><b>Hitch</b><span id="tray-l">…</span></span><i id="tray-dot"></i><span class="badge" id="tray-badge" hidden></span></div>
-<div id="toasts"></div>
+<div id="toasts" aria-live="polite"></div>
 <dialog id="ask"><div class="t" id="ask-t">Question</div><div class="b"><div></div><div id="ask-b"></div></div><div class="f"><button id="ask-cancel">Cancel</button><button id="ask-ok">OK</button></div></dialog>
 <dialog id="about"><div class="t">About Hitch</div><div class="b"><div></div><div>
 <p><b>Hitch 0.1</b> · payment channels in a browser tab, for txbt4, the BLAKE2b testnet4.</p>
