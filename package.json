@@ -1,0 +1,1 @@
+{ "name": "hitch", "private": true, "type": "module", "scripts": { "test": "node test/channel-test.mjs && node test/peer-test.mjs && node test/adversarial-test.mjs" } }
