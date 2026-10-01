@@ -2,7 +2,7 @@
 // settles; lib/channel.mjs builds and checks every transaction; lib/peer.mjs is the protocol, lib/route.mjs the routing;
 // this file is the host: the relays, the chain, the coins, the window. Messages are signed, not encrypted.
 const $ = (id) => document.getElementById(id);
-const NODE = 'https://cdn.jsdelivr.net/gh/bitcoin-blake/blaketestnode@c03bf56404e986bf633a44d8a7bbb530ec282cb5';
+const NODE = 'https://cdn.jsdelivr.net/gh/bitcoin-blake/blaketestnode@c3f6a46a5ae29702df60f0bd87a8d15a8993a84f';
 const LIB = 'https://cdn.jsdelivr.net/gh/sidestr/spec@fe689e9c723f9bf43393d2dd5b6f924a701c8a18/siding/lib', CDN = 'https://cdn.jsdelivr.net/gh/bitcoin-desktop/schema@v0.0.27';
 const CHAIN = 'btc:testnet4-blake2b', KIND = 23600, BROADCAST_CHAIN = 'sidestr:tally', EXPLORER = 'https://mempool.guide/testnet4';
 const DEFAULT_RELAYS = ['wss://relay.primal.net', 'wss://nostr.oxtr.dev', 'wss://nos.lol', 'wss://nostr.mom'];
